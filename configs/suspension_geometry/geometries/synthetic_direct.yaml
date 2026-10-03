@@ -1,0 +1,185 @@
+schema_version: 1.0.0
+id: synthetic-direct
+synthetic: true
+units:
+  length: m
+  angle: rad
+reference_origin_world:
+- 0.0
+- 0.0
+- 0.0
+corners:
+  FL:
+    wheel_center:
+    - 1.3
+    - 0.75
+    - 0.32
+    spindle_axis:
+    - 0.0
+    - 1.0
+    - 0.0
+    radius: 0.32
+    lower:
+      inboard_a:
+      - 1.08
+      - 0.35
+      - 0.2
+      inboard_b:
+      - 1.52
+      - 0.35
+      - 0.2
+      outboard:
+      - 1.3
+      - 0.75
+      - 0.2
+    upper:
+      inboard_a:
+      - 1.1
+      - 0.4
+      - 0.49
+      inboard_b:
+      - 1.5
+      - 0.4
+      - 0.49
+      outboard:
+      - 1.3
+      - 0.75
+      - 0.49
+    tie:
+      inboard:
+      - 0.8200000000000001
+      - 0.35
+      - 0.45
+      outboard:
+      - 1.02
+      - 0.7
+      - 0.43
+    jounce_limits:
+    - -0.08
+    - 0.08
+    spring:
+      type: direct
+      fixed:
+      - 1.3
+      - 0.3
+      - 0.7
+      moving:
+        body: lower
+        point:
+        - 1.3
+        - 0.71
+        - 0.2
+      length_limits:
+      - 0.35
+      - 0.65
+  RL:
+    wheel_center:
+    - -1.2
+    - 0.75
+    - 0.32
+    spindle_axis:
+    - 0.0
+    - 1.0
+    - 0.0
+    radius: 0.32
+    lower:
+      inboard_a:
+      - -1.42
+      - 0.35
+      - 0.2
+      inboard_b:
+      - -0.98
+      - 0.35
+      - 0.2
+      outboard:
+      - -1.2
+      - 0.75
+      - 0.2
+    upper:
+      inboard_a:
+      - -1.4
+      - 0.4
+      - 0.49
+      inboard_b:
+      - -1.0
+      - 0.4
+      - 0.49
+      outboard:
+      - -1.2
+      - 0.75
+      - 0.49
+    tie:
+      inboard:
+      - -1.68
+      - 0.35
+      - 0.45
+      outboard:
+      - -1.48
+      - 0.7
+      - 0.43
+    jounce_limits:
+    - -0.08
+    - 0.08
+    spring:
+      type: direct
+      fixed:
+      - -1.2
+      - 0.3
+      - 0.7
+      moving:
+        body: lower
+        point:
+        - -1.2
+        - 0.71
+        - 0.2
+      length_limits:
+      - 0.35
+      - 0.65
+mirror_right: true
+arbs:
+  front:
+    left:
+      pivot:
+      - 1.1800000000000002
+      - 0.42
+      - 0.43
+      axis:
+      - 1.0
+      - 0.0
+      - 0.0
+      tip:
+      - 1.1800000000000002
+      - 0.55
+      - 0.43
+      pickup:
+        body: lower
+        point:
+        - 1.3
+        - 0.65
+        - 0.2
+      angle_limits:
+      - -0.4
+      - 0.4
+  rear:
+    left:
+      pivot:
+      - -1.3199999999999998
+      - 0.42
+      - 0.43
+      axis:
+      - 1.0
+      - 0.0
+      - 0.0
+      tip:
+      - -1.3199999999999998
+      - 0.55
+      - 0.43
+      pickup:
+        body: lower
+        point:
+        - -1.2
+        - 0.65
+        - 0.2
+      angle_limits:
+      - -0.4
+      - 0.4

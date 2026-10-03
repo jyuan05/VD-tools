@@ -1,0 +1,33 @@
+schema_version: 1.0.0
+id: synthetic-direct-heave
+geometry: ../geometries/synthetic_direct.yaml
+setup: ../setups/synthetic_direct_loaded.yaml
+units:
+  length: m
+  angle: rad
+reference:
+- 0.0
+- 0.0
+- 0.0
+axes:
+  heave:
+    min: -0.02
+    max: 0.04
+    count: 13
+  roll:
+  - 0.0
+  pitch:
+  - 0.0
+metrics:
+- spring_motion_ratio
+- damper_motion_ratio
+- wheel_tangent_rate
+- ride_rate
+- body_stiffness
+- heave_stiffness
+- pitch_stiffness
+- front_roll_stiffness
+- rear_roll_stiffness
+plots:
+- spring_motion_ratio
+- wheel_tangent_rate

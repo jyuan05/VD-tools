@@ -1,0 +1,48 @@
+schema_version: 1.0.0
+id: synthetic-direct-loaded
+units:
+  length: m
+  force: N
+  angle: rad
+corners:
+  FL:
+    spring:
+      rate: 32000.0
+      preload_force: 525.0
+    tyre:
+      rate: 185000.0
+      reference_force: 3050.0
+    bump_stop:
+      engagement: 0.055
+      rate: 92000.0
+  FR:
+    spring:
+      rate: 32000.0
+      preload_force: 525.0
+    tyre:
+      rate: 185000.0
+      reference_force: 3050.0
+    bump_stop:
+      engagement: 0.055
+      rate: 92000.0
+  RL:
+    spring:
+      rate: 29000.0
+      preload_force: 425.0
+    tyre:
+      rate: 170000.0
+      reference_force: 2850.0
+  RR:
+    spring:
+      rate: 29000.0
+      preload_force: 425.0
+    tyre:
+      rate: 170000.0
+      reference_force: 2850.0
+arbs:
+  front:
+    rate: 900.0
+    reference_twist: 0.008
+  rear:
+    rate: 680.0
+    reference_twist: -0.003

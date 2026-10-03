@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vd-suspension-geometry"
+version = "0.1.0"
+description = "Config-driven suspension geometry and elastic metric maps"
+readme = "examples/suspension_geometry/README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "h5py>=3.10,<4",
+    "matplotlib>=3.8,<4",
+    "numpy>=1.26,<3",
+    "PyYAML>=6,<7",
+    "scipy>=1.11,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+]
+
+[project.scripts]
+vd-suspension = "suspension_geometry.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["suspension_geometry*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
