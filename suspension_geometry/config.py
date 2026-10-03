@@ -463,13 +463,40 @@ def load_geometry(path: str | Path) -> dict[str, Any]:
     return _parse_geometry_mapping(raw, source=source)
 
 
+def _require_unit_direction(value: Any, path: str) -> None:
+    direction = _vector(value, path)
+    norm = math.sqrt(sum(component * component for component in direction))
+    if not math.isclose(norm, 1.0, rel_tol=1e-9, abs_tol=1e-12):
+        raise ConfigError(f"{path}: canonical direction vector must already be normalized to unit length")
+
+
 def validate_geometry(geometry: Mapping[str, Any]) -> None:
     """Validate a canonical SI geometry dictionary without running the solver."""
     value = _mapping(geometry, "geometry")
     source = value.pop("source", {})
-    parsed = _parse_geometry_mapping(value, source=source, canonical=True)
-    if set(parsed["corners"]) != set(CORNER_ORDER):
-        raise ConfigError("geometry.corners: canonical geometry must contain FL, FR, RL and RR")
+    units = _mapping(value.get("units"), "geometry.units")
+    if units != {"length": "m", "angle": "rad"}:
+        raise ConfigError("geometry.units: validate_geometry accepts canonical SI units only (m and rad)")
+    corners = _mapping(value.get("corners"), "geometry.corners")
+    for name in CORNER_ORDER:
+        if name not in corners:
+            continue
+        corner = _mapping(corners[name], f"geometry.corners.{name}")
+        if "damper" not in corner:
+            raise ConfigError(
+                f"geometry.corners.{name}.damper: canonical geometry must include resolved damper geometry"
+            )
+        _require_unit_direction(corner.get("spindle_axis"), f"geometry.corners.{name}.spindle_axis")
+        if "rocker" in corner:
+            rocker = _mapping(corner["rocker"], f"geometry.corners.{name}.rocker")
+            _require_unit_direction(rocker.get("axis"), f"geometry.corners.{name}.rocker.axis")
+    arbs = _mapping(value.get("arbs", {}), "geometry.arbs")
+    for axle, axle_value in arbs.items():
+        axle_data = _mapping(axle_value, f"geometry.arbs.{axle}")
+        for side, lever_value in axle_data.items():
+            lever = _mapping(lever_value, f"geometry.arbs.{axle}.{side}")
+            _require_unit_direction(lever.get("axis"), f"geometry.arbs.{axle}.{side}.axis")
+    _parse_geometry_mapping(value, source=source, canonical=True)
     return None
 
 
@@ -680,13 +707,32 @@ def _string_list(value: Any, path: str) -> list[str]:
     return result
 
 
-def _axis(value: Any, path: str, scale: float) -> list[float]:
+def _axis_count(value: Any, path: str) -> int:
+    if isinstance(value, Mapping):
+        axis = _mapping(value, path)
+        _fields(axis, allowed={"min", "max", "count"}, required={"min", "max", "count"}, path=path)
+        minimum = _finite(axis["min"], f"{path}.min")
+        maximum = _finite(axis["max"], f"{path}.max")
+        count = _integer(axis["count"], f"{path}.count", minimum=1)
+        if maximum < minimum:
+            raise ConfigError(f"{path}: max must be at least min")
+        if count > 1 and maximum == minimum:
+            raise ConfigError(f"{path}: range endpoints must differ when count is greater than one")
+        return count
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ConfigError(f"{path}: expected a non-empty list or min/max/count mapping")
+    return len(value)
+
+
+def _axis(value: Any, path: str, scale: float, *, max_count: int | None = None) -> list[float]:
     if isinstance(value, Mapping):
         axis = _mapping(value, path)
         _fields(axis, allowed={"min", "max", "count"}, required={"min", "max", "count"}, path=path)
         minimum = _finite(axis["min"], f"{path}.min") * scale
         maximum = _finite(axis["max"], f"{path}.max") * scale
         count = _integer(axis["count"], f"{path}.count", minimum=1)
+        if max_count is not None and count > max_count:
+            raise ConfigError(f"{path}.count: generated axis exceeds max_samples limit {max_count}")
         if maximum < minimum:
             raise ConfigError(f"{path}: max must be at least min")
         if count > 1 and maximum == minimum:
@@ -794,17 +840,28 @@ def _parse_study_mapping(raw: Mapping[str, Any], *, file_path: Path, source: Any
         required={"heave", "roll", "pitch"},
         path="study.axes",
     )
-    axes = {
-        "heave_m": _axis(axes_raw["heave"], "study.axes.heave", units["length"]),
-        "roll_rad": _axis(axes_raw["roll"], "study.axes.roll", units["angle"]),
-        "pitch_rad": _axis(axes_raw["pitch"], "study.axes.pitch", units["angle"]),
-    }
     solver = _solver(raw.get("solver"), units["length"], units["angle"])
-    sample_count = len(axes["heave_m"]) * len(axes["roll_rad"]) * len(axes["pitch_rad"])
+    axis_counts = {
+        "heave": _axis_count(axes_raw["heave"], "study.axes.heave"),
+        "roll": _axis_count(axes_raw["roll"], "study.axes.roll"),
+        "pitch": _axis_count(axes_raw["pitch"], "study.axes.pitch"),
+    }
+    sample_count = axis_counts["heave"] * axis_counts["roll"] * axis_counts["pitch"]
     if sample_count > solver["max_samples"]:
         raise ConfigError(
             f"study.solver.max_samples: grid has {sample_count} samples, exceeding limit {solver['max_samples']}"
         )
+    axes = {
+        "heave_m": _axis(
+            axes_raw["heave"], "study.axes.heave", units["length"], max_count=solver["max_samples"]
+        ),
+        "roll_rad": _axis(
+            axes_raw["roll"], "study.axes.roll", units["angle"], max_count=solver["max_samples"]
+        ),
+        "pitch_rad": _axis(
+            axes_raw["pitch"], "study.axes.pitch", units["angle"], max_count=solver["max_samples"]
+        ),
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "id": study_id,

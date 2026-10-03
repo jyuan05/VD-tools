@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 import math
 from pathlib import Path
@@ -331,6 +332,75 @@ def test_rocker_attachment_is_allowed_only_on_rocker_corner(tmp_path):
 
     with pytest.raises(ValueError, match=r"FL.*rocker"):
         _api("load_geometry")(_write_yaml(tmp_path, "orphan-rocker-attachment.yaml", raw))
+
+
+def test_validate_geometry_rejects_noncanonical_units(tmp_path):
+    raw = _geometry(units={"length": "mm", "angle": "deg"})
+
+    with pytest.raises(ValueError, match=r"canonical.*SI|units.*m.*rad"):
+        _api("validate_geometry")(raw)
+
+
+def test_validate_geometry_requires_resolved_damper_geometry(tmp_path):
+    geometry = _api("load_geometry")(_write_yaml(tmp_path, "resolved.yaml", _geometry()))
+    del geometry["corners"]["FL"]["damper"]
+
+    with pytest.raises(ValueError, match=r"FL.*damper"):
+        _api("validate_geometry")(geometry)
+
+
+def test_validate_geometry_rejects_unnormalized_directions_without_mutating_input(tmp_path):
+    raw = _geometry(mirrored=True, rocker=True)
+    raw["arbs"] = {
+        "front": {
+            "left": {
+                "pivot": [1.2, 0.42, 0.43],
+                "axis": [1.0, 0.0, 0.0],
+                "tip": [1.2, 0.55, 0.43],
+                "pickup": _attachment("lower", [1.3, 0.65, 0.20]),
+                "angle_limits": [-0.4, 0.4],
+            }
+        }
+    }
+    geometry = _api("load_geometry")(_write_yaml(tmp_path, "directions.yaml", raw))
+    direction_locations = (
+        (("corners", "FL", "spindle_axis"), [0.0, 2.0, 0.0]),
+        (("corners", "FL", "rocker", "axis"), [2.0, 0.0, 0.0]),
+        (("arbs", "front", "left", "axis"), [2.0, 0.0, 0.0]),
+    )
+
+    for path, unnormalized in direction_locations:
+        candidate = copy.deepcopy(geometry)
+        target = candidate
+        for part in path[:-1]:
+            target = target[part]
+        target[path[-1]] = unnormalized
+        before = copy.deepcopy(candidate)
+        with pytest.raises(ValueError, match=r"normalized|unit direction"):
+            _api("validate_geometry")(candidate)
+        assert candidate == before
+
+
+def test_oversized_generated_axis_is_rejected_before_axis_materialization(tmp_path, monkeypatch):
+    raw = _study(
+        axes={
+            "heave": {"min": 0.0, "max": 1.0, "count": 10**12},
+            "roll": [0.0],
+            "pitch": [0.0],
+        }
+    )
+    study_path = _write_yaml(tmp_path, "enormous-axis.yaml", raw)
+    materialize_called = False
+
+    def forbidden_materialization(*args, **kwargs):
+        nonlocal materialize_called
+        materialize_called = True
+        raise AssertionError("generated axis materialization ran before the sample cap")
+
+    monkeypatch.setattr(config, "_axis", forbidden_materialization)
+    with pytest.raises(ValueError, match=r"max_samples"):
+        _api("load_study")(study_path)
+    assert not materialize_called
 
 
 def test_bundled_synthetic_studies_resolve_to_valid_inputs():
