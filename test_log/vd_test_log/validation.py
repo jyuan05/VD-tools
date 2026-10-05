@@ -67,6 +67,16 @@ def validate_setup(record: Setup) -> None:
     if not isinstance(record.settings_text, str):
         raise ValidationError("settings_text", "Enter setup settings as text.")
     _optional_text(record.notes, "notes")
+    _optional_text(record.event_layout_id, "event_layout_id")
+    _optional_text(record.driver, "driver")
+    if not isinstance(record.structured_settings_json, str):
+        raise ValidationError(
+            "structured_settings_json",
+            "Enter structured setup settings as JSON text.",
+        )
+    from .setup_settings import normalise_setup_settings_json
+
+    normalise_setup_settings_json(record.structured_settings_json)
     if isinstance(record.order, bool) or not isinstance(record.order, int) or record.order <= 0:
         raise ValidationError("order", "Setup order must be a positive whole number.")
     _aware_timestamp(record.created_at)

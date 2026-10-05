@@ -42,6 +42,9 @@ class Setup:
     notes: str | None
     order: int
     created_at: str
+    event_layout_id: str | None = None
+    driver: str | None = None
+    structured_settings_json: str = '{}'
 
 
 @dataclass(frozen=True, slots=True)

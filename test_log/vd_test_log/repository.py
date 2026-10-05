@@ -17,6 +17,7 @@ from .models import (
     new_id,
     utc_now_iso,
 )
+from .setup_settings import normalise_setup_settings_json
 from .validation import (
     ValidationError,
     validate_day,
@@ -27,7 +28,7 @@ from .validation import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _OWNER_COLUMNS = {
     "day": "day_owner_id",
@@ -57,6 +58,9 @@ _CREATE_STATEMENTS = (
         notes TEXT,
         sort_order INTEGER NOT NULL CHECK (sort_order > 0),
         created_at TEXT NOT NULL,
+        event_layout_id TEXT REFERENCES event_layouts(id) ON DELETE RESTRICT,
+        driver TEXT,
+        structured_settings_json TEXT NOT NULL DEFAULT '{}',
         UNIQUE (test_day_id, sort_order)
     )
     """,
@@ -121,6 +125,7 @@ _CREATE_STATEMENTS = (
     )
     """,
     "CREATE INDEX setups_by_day_order ON setups(test_day_id, sort_order)",
+    "CREATE INDEX setups_by_event_layout ON setups(event_layout_id)",
     "CREATE INDEX laps_by_setup_sequence ON laps(setup_id, sequence)",
     "CREATE INDEX laps_by_event_layout ON laps(event_layout_id)",
     "CREATE INDEX attachments_by_day ON attachments(day_owner_id)",
@@ -131,7 +136,10 @@ _CREATE_STATEMENTS = (
     CREATE TRIGGER referenced_event_fields_immutable
     BEFORE UPDATE OF track_name, layout_name, event_name, event_type, length_m, notes
     ON event_layouts
-    WHEN EXISTS (SELECT 1 FROM laps WHERE event_layout_id = OLD.id)
+    WHEN (
+        EXISTS (SELECT 1 FROM laps WHERE event_layout_id = OLD.id)
+        OR EXISTS (SELECT 1 FROM setups WHERE event_layout_id = OLD.id)
+    )
       AND (
           OLD.track_name IS NOT NEW.track_name
           OR OLD.layout_name IS NOT NEW.layout_name
@@ -148,7 +156,10 @@ _CREATE_STATEMENTS = (
     CREATE TRIGGER referenced_event_attachment_insert_immutable
     BEFORE INSERT ON attachments
     WHEN NEW.event_layout_owner_id IS NOT NULL
-      AND EXISTS (SELECT 1 FROM laps WHERE event_layout_id = NEW.event_layout_owner_id)
+      AND (
+          EXISTS (SELECT 1 FROM laps WHERE event_layout_id = NEW.event_layout_owner_id)
+          OR EXISTS (SELECT 1 FROM setups WHERE event_layout_id = NEW.event_layout_owner_id)
+      )
     BEGIN
         SELECT RAISE(ABORT, 'referenced event/layout attachments are immutable');
     END
@@ -158,10 +169,16 @@ _CREATE_STATEMENTS = (
     BEFORE UPDATE ON attachments
     WHEN (
         OLD.event_layout_owner_id IS NOT NULL
-        AND EXISTS (SELECT 1 FROM laps WHERE event_layout_id = OLD.event_layout_owner_id)
+        AND (
+            EXISTS (SELECT 1 FROM laps WHERE event_layout_id = OLD.event_layout_owner_id)
+            OR EXISTS (SELECT 1 FROM setups WHERE event_layout_id = OLD.event_layout_owner_id)
+        )
     ) OR (
         NEW.event_layout_owner_id IS NOT NULL
-        AND EXISTS (SELECT 1 FROM laps WHERE event_layout_id = NEW.event_layout_owner_id)
+        AND (
+            EXISTS (SELECT 1 FROM laps WHERE event_layout_id = NEW.event_layout_owner_id)
+            OR EXISTS (SELECT 1 FROM setups WHERE event_layout_id = NEW.event_layout_owner_id)
+        )
     )
     BEGIN
         SELECT RAISE(ABORT, 'referenced event/layout attachments are immutable');
@@ -171,7 +188,10 @@ _CREATE_STATEMENTS = (
     CREATE TRIGGER referenced_event_attachment_delete_immutable
     BEFORE DELETE ON attachments
     WHEN OLD.event_layout_owner_id IS NOT NULL
-      AND EXISTS (SELECT 1 FROM laps WHERE event_layout_id = OLD.event_layout_owner_id)
+      AND (
+          EXISTS (SELECT 1 FROM laps WHERE event_layout_id = OLD.event_layout_owner_id)
+          OR EXISTS (SELECT 1 FROM setups WHERE event_layout_id = OLD.event_layout_owner_id)
+      )
     BEGIN
         SELECT RAISE(ABORT, 'referenced event/layout attachments are immutable');
     END
@@ -216,13 +236,35 @@ class SQLiteRepository:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
+        required_tables = {"test_days", "setups", "event_layouts", "laps", "attachments"}
         if version == SCHEMA_VERSION:
-            required = {"test_days", "setups", "event_layouts", "laps", "attachments"}
-            if not required.issubset(table_names):
+            if not required_tables.issubset(table_names):
+                raise ValidationError(
+                    "database",
+                    "The version 2 test log database is incomplete and was not changed.",
+                )
+            setup_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(setups)")
+            }
+            required_setup_columns = {
+                "event_layout_id",
+                "driver",
+                "structured_settings_json",
+            }
+            if not required_setup_columns.issubset(setup_columns):
+                raise ValidationError(
+                    "database",
+                    "The version 2 test log database is incomplete and was not changed.",
+                )
+            return
+        if version == 1:
+            if not required_tables.issubset(table_names):
                 raise ValidationError(
                     "database",
                     "The version 1 test log database is incomplete and was not changed.",
                 )
+            SQLiteRepository._migrate_schema_one_to_two(connection)
             return
         if version > SCHEMA_VERSION:
             raise ValidationError(
@@ -239,6 +281,118 @@ class SQLiteRepository:
         try:
             for statement in _CREATE_STATEMENTS:
                 connection.execute(statement)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_schema_one_to_two(connection: sqlite3.Connection) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                """
+                ALTER TABLE setups
+                ADD COLUMN event_layout_id TEXT
+                    REFERENCES event_layouts(id) ON DELETE RESTRICT
+                """
+            )
+            connection.execute("ALTER TABLE setups ADD COLUMN driver TEXT")
+            connection.execute(
+                "ALTER TABLE setups ADD COLUMN structured_settings_json TEXT NOT NULL DEFAULT '{}'"
+            )
+
+            setup_rows = list(connection.execute("SELECT id FROM setups"))
+            for setup_row in setup_rows:
+                laps = list(
+                    connection.execute(
+                        "SELECT event_layout_id, driver FROM laps WHERE setup_id = ?",
+                        (setup_row["id"],),
+                    )
+                )
+                if not laps:
+                    continue
+                event_ids = {lap["event_layout_id"] for lap in laps}
+                drivers = {lap["driver"] for lap in laps}
+                event_default = next(iter(event_ids)) if len(event_ids) == 1 else None
+                driver_default = next(iter(drivers)) if len(drivers) == 1 else None
+                if event_default is not None or driver_default is not None:
+                    connection.execute(
+                        """
+                        UPDATE setups
+                        SET event_layout_id = ?, driver = ?
+                        WHERE id = ?
+                        """,
+                        (event_default, driver_default, setup_row["id"]),
+                    )
+
+            connection.execute("CREATE INDEX setups_by_event_layout ON setups(event_layout_id)")
+            connection.execute(
+                """
+                CREATE TRIGGER setup_referenced_event_fields_immutable
+                BEFORE UPDATE OF track_name, layout_name, event_name, event_type, length_m, notes
+                ON event_layouts
+                WHEN EXISTS (SELECT 1 FROM setups WHERE event_layout_id = OLD.id)
+                  AND (
+                      OLD.track_name IS NOT NEW.track_name
+                      OR OLD.layout_name IS NOT NEW.layout_name
+                      OR OLD.event_name IS NOT NEW.event_name
+                      OR OLD.event_type IS NOT NEW.event_type
+                      OR OLD.length_m IS NOT NEW.length_m
+                      OR OLD.notes IS NOT NEW.notes
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'referenced event/layout details are immutable');
+                END
+                """
+            )
+            connection.execute(
+                """
+                CREATE TRIGGER setup_referenced_event_attachment_insert_immutable
+                BEFORE INSERT ON attachments
+                WHEN NEW.event_layout_owner_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM setups WHERE event_layout_id = NEW.event_layout_owner_id
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'referenced event/layout attachments are immutable');
+                END
+                """
+            )
+            connection.execute(
+                """
+                CREATE TRIGGER setup_referenced_event_attachment_update_immutable
+                BEFORE UPDATE ON attachments
+                WHEN (
+                    OLD.event_layout_owner_id IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM setups WHERE event_layout_id = OLD.event_layout_owner_id
+                    )
+                ) OR (
+                    NEW.event_layout_owner_id IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM setups WHERE event_layout_id = NEW.event_layout_owner_id
+                    )
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'referenced event/layout attachments are immutable');
+                END
+                """
+            )
+            connection.execute(
+                """
+                CREATE TRIGGER setup_referenced_event_attachment_delete_immutable
+                BEFORE DELETE ON attachments
+                WHEN OLD.event_layout_owner_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM setups WHERE event_layout_id = OLD.event_layout_owner_id
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, 'referenced event/layout attachments are immutable');
+                END
+                """
+            )
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
         except Exception:
@@ -276,6 +430,9 @@ class SQLiteRepository:
             notes=row["notes"],
             order=row["sort_order"],
             created_at=row["created_at"],
+            event_layout_id=row["event_layout_id"],
+            driver=row["driver"],
+            structured_settings_json=row["structured_settings_json"],
         )
 
     @staticmethod
@@ -447,9 +604,31 @@ class SQLiteRepository:
             if previous is not None and previous.test_day_id != record.test_day_id:
                 raise ValidationError("test_day_id", "A saved setup cannot be moved to another test day.")
             saved = replace(record, created_at=previous.created_at) if previous else record
+            event_layout_id = saved.event_layout_id
+            if isinstance(event_layout_id, str) and not event_layout_id.strip():
+                event_layout_id = None
+            driver = saved.driver
+            if isinstance(driver, str) and not driver.strip():
+                driver = None
+            saved = replace(
+                saved,
+                event_layout_id=event_layout_id,
+                driver=driver,
+                structured_settings_json=normalise_setup_settings_json(
+                    saved.structured_settings_json
+                ),
+            )
             validate_setup(saved)
             if self.get_day(saved.test_day_id) is None:
                 raise ValidationError("test_day_id", "Select an existing test day.")
+            if (
+                saved.event_layout_id is not None
+                and self.get_event_layout(saved.event_layout_id) is None
+            ):
+                raise ValidationError(
+                    "event_layout_id",
+                    "Select an existing event/layout or leave this field blank.",
+                )
             rows = list(
                 self._connection.execute(
                     "SELECT id, sort_order FROM setups WHERE test_day_id = ? ORDER BY sort_order, id",
@@ -472,9 +651,10 @@ class SQLiteRepository:
                     """
                     INSERT INTO setups(
                         id, test_day_id, name, setup_code, settings_text, notes,
+                        event_layout_id, driver, structured_settings_json,
                         sort_order, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         saved.id,
@@ -483,6 +663,9 @@ class SQLiteRepository:
                         saved.setup_code,
                         saved.settings_text,
                         saved.notes,
+                        saved.event_layout_id,
+                        saved.driver,
+                        saved.structured_settings_json,
                         temporary_order,
                         saved.created_at,
                     ),
@@ -491,10 +674,20 @@ class SQLiteRepository:
                 self._connection.execute(
                     """
                     UPDATE setups
-                    SET name = ?, setup_code = ?, settings_text = ?, notes = ?
+                    SET name = ?, setup_code = ?, settings_text = ?, notes = ?,
+                        event_layout_id = ?, driver = ?, structured_settings_json = ?
                     WHERE id = ?
                     """,
-                    (saved.name, saved.setup_code, saved.settings_text, saved.notes, saved.id),
+                    (
+                        saved.name,
+                        saved.setup_code,
+                        saved.settings_text,
+                        saved.notes,
+                        saved.event_layout_id,
+                        saved.driver,
+                        saved.structured_settings_json,
+                        saved.id,
+                    ),
                 )
             for order_value, setup_id in enumerate(ordered_ids, start=1):
                 self._connection.execute(
@@ -772,8 +965,13 @@ class SQLiteRepository:
 
     def event_is_referenced(self, identifier: str) -> bool:
         row = self._connection.execute(
-            "SELECT 1 FROM laps WHERE event_layout_id = ? LIMIT 1",
-            (identifier,),
+            """
+            SELECT 1 FROM laps WHERE event_layout_id = ?
+            UNION ALL
+            SELECT 1 FROM setups WHERE event_layout_id = ?
+            LIMIT 1
+            """,
+            (identifier, identifier),
         ).fetchone()
         return row is not None
 

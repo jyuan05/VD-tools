@@ -1,4 +1,5 @@
 import dataclasses
+import json
 from contextlib import closing
 import math
 import sqlite3
@@ -145,15 +146,20 @@ class RepositoryTests(unittest.TestCase):
         parsed_created_at = datetime.fromisoformat(attachments[0].created_at)
         self.assertIsNotNone(parsed_created_at.tzinfo)
 
-    def test_new_database_uses_schema_version_one(self):
+    def test_new_database_uses_schema_version_two(self):
         with closing(sqlite3.connect(self.database_path)) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(version, 1)
+            setup_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(setups)")
+            }
+        self.assertEqual(version, 2)
+        self.assertTrue(
+            {"event_layout_id", "driver", "structured_settings_json"} <= setup_columns
+        )
 
         self.repository.close()
         self.repository = SQLiteRepository.open(self.database_path)
         self.assertEqual(self.repository.list_days(), [])
-
     def test_rejects_impossible_dates_and_blank_required_text(self):
         invalid_records = (
             (make_day(date="2026-02-30"), "date"),
@@ -587,6 +593,172 @@ class RepositoryTests(unittest.TestCase):
                         connection.execute("SELECT value FROM sentinel").fetchone()[0],
                         "preserve me",
                     )
+
+
+    def test_setup_metadata_has_trailing_optional_defaults(self):
+        required_fields = {"event_layout_id", "driver", "structured_settings_json"}
+        self.assertTrue(required_fields <= Setup.__dataclass_fields__.keys())
+        setup = make_setup()
+        self.assertIsNone(setup.event_layout_id)
+        self.assertIsNone(setup.driver)
+        self.assertEqual(setup.structured_settings_json, "{}")
+
+    def test_setup_metadata_and_settings_persist_and_protect_event_references(self):
+        required_fields = {"event_layout_id", "driver", "structured_settings_json"}
+        self.assertTrue(required_fields <= Setup.__dataclass_fields__.keys())
+        day, setup, event = self.add_context()
+        second_event = self.repository.save_event_layout(
+            make_event("event-2", layout_name="Other Loop")
+        )
+        configured = dataclasses.replace(
+            setup,
+            event_layout_id=second_event.id,
+            driver="Driver Two",
+            structured_settings_json=json.dumps(
+                {"front_wing_height": "2", "corners": {"FL": {"toe": 0.0}}}
+            ),
+        )
+        saved = self.repository.save_setup(configured)
+        self.assertEqual(saved.event_layout_id, second_event.id)
+        self.assertEqual(saved.driver, "Driver Two")
+        self.assertEqual(
+            json.loads(saved.structured_settings_json),
+            {"front_wing_height": "2", "corners": {"FL": {"toe": 0.0}}},
+        )
+
+        self.repository.close()
+        self.repository = SQLiteRepository.open(self.database_path)
+        reopened = self.repository.get_setup(setup.id)
+        self.assertEqual(reopened.event_layout_id, second_event.id)
+        self.assertEqual(reopened.driver, "Driver Two")
+        self.assertEqual(
+            json.loads(reopened.structured_settings_json),
+            {"front_wing_height": "2", "corners": {"FL": {"toe": 0.0}}},
+        )
+        self.assertTrue(self.repository.event_is_referenced(second_event.id))
+        with self.assertRaises(ValidationError) as raised:
+            self.repository.delete_event_layout(second_event.id)
+        self.assertEqual(raised.exception.field, "event_layout")
+
+        cleared = dataclasses.replace(
+            reopened, event_layout_id=None, driver=None, structured_settings_json="{}"
+        )
+        self.repository.save_setup(cleared)
+        self.assertFalse(self.repository.event_is_referenced(second_event.id))
+        self.repository.delete_event_layout(second_event.id)
+
+    def test_setup_event_must_reference_an_existing_event(self):
+        required_fields = {"event_layout_id", "driver", "structured_settings_json"}
+        self.assertTrue(required_fields <= Setup.__dataclass_fields__.keys())
+        self.repository.save_day(make_day())
+        invalid_setup = dataclasses.replace(
+            make_setup(), event_layout_id="missing-event"
+        )
+        with self.assertRaises(ValidationError) as raised:
+            self.repository.save_setup(invalid_setup)
+        self.assertEqual(raised.exception.field, "event_layout_id")
+        self.assertIsNone(self.repository.get_setup(invalid_setup.id))
+
+    def test_setup_default_changes_leave_existing_lap_snapshots_unchanged(self):
+        required_fields = {"event_layout_id", "driver", "structured_settings_json"}
+        self.assertTrue(required_fields <= Setup.__dataclass_fields__.keys())
+        day = make_day()
+        setup = make_setup()
+        first_event = make_event()
+        second_event = make_event("event-2", layout_name="Other Loop")
+        self.repository.save_day(day)
+        self.repository.save_event_layout(first_event)
+        self.repository.save_event_layout(second_event)
+        configured = dataclasses.replace(
+            setup, event_layout_id=first_event.id, driver="Driver One"
+        )
+        self.repository.save_setup(configured)
+        lap = make_lap(driver="Driver One")
+        self.repository.save_lap(lap)
+
+        changed = dataclasses.replace(
+            configured, event_layout_id=second_event.id, driver="Driver Two"
+        )
+        self.repository.save_setup(changed)
+
+        saved_lap = self.repository.get_lap(lap.id)
+        self.assertEqual(saved_lap.event_layout_id, first_event.id)
+        self.assertEqual(saved_lap.driver, "Driver One")
+        self.assertEqual(self.repository.best_laps_by_event(setup.id), {first_event.id: lap})
+
+    def test_setup_event_reference_protects_event_and_attachments_but_allows_archiving(self):
+        _, setup, event = self.add_context()
+        attachment = StagedAttachment(
+            role="map",
+            original_name="map.png",
+            relative_path="events/event-1/map.png",
+        )
+        self.repository.save_event_layout(event, attachments=(attachment,))
+        self.repository.save_setup(
+            dataclasses.replace(setup, event_layout_id=event.id, driver="Driver One")
+        )
+
+        with self.repository._connection:
+            self.repository._connection.execute(
+                "UPDATE event_layouts SET archived = 1 WHERE id = ?",
+                (event.id,),
+            )
+        self.assertTrue(self.repository.get_event_layout(event.id).archived)
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.repository._connection:
+                self.repository._connection.execute(
+                    "UPDATE event_layouts SET track_name = ? WHERE id = ?",
+                    ("Changed track", event.id),
+                )
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.repository._connection:
+                self.repository._connection.execute(
+                    "UPDATE attachments SET original_name = ? WHERE relative_path = ?",
+                    ("changed.png", attachment.relative_path),
+                )
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.repository._connection:
+                self.repository._connection.execute(
+                    "DELETE FROM attachments WHERE relative_path = ?",
+                    (attachment.relative_path,),
+                )
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.repository._connection:
+                self.repository._connection.execute(
+                    """
+                    INSERT INTO attachments(
+                        id, owner_type, event_layout_owner_id, role,
+                        original_name, relative_path, created_at
+                    )
+                    VALUES (?, 'event_layout', ?, 'map', ?, ?, ?)
+                    """,
+                    (
+                        "new-setup-referenced-map",
+                        event.id,
+                        "second map",
+                        "events/event-1/second-map.png",
+                        CREATED_AT,
+                    ),
+                )
+        self.assertEqual(
+            [item.relative_path for item in self.repository.list_attachments("event_layout", event.id)],
+            [attachment.relative_path],
+        )
+
+    def test_rejects_invalid_structured_setup_json_without_changing_saved_record(self):
+        _, setup, _ = self.add_context()
+        invalid_values = (
+            ('{"front_wing_height":"6"}', "front_wing_height"),
+            ('{"front_damping_ratio":NaN}', "front_damping_ratio"),
+        )
+        for value, field in invalid_values:
+            with self.subTest(field=field):
+                invalid = dataclasses.replace(setup, structured_settings_json=value)
+                with self.assertRaises(ValidationError) as raised:
+                    self.repository.save_setup(invalid)
+                self.assertEqual(raised.exception.field, field)
+                self.assertEqual(self.repository.get_setup(setup.id), setup)
 
 
 if __name__ == "__main__":

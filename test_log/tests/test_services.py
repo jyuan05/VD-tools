@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -162,6 +163,34 @@ class TestLogServicesTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertFalse(stored.exists())
         self.assertIsNone(self.services.get_setup(setup.id))
+
+
+    def test_duplicate_setup_copies_event_driver_and_structured_settings(self):
+        required_fields = {"event_layout_id", "driver", "structured_settings_json"}
+        self.assertTrue(required_fields <= Setup.__dataclass_fields__.keys())
+        day = self.make_day()
+        event = self.make_event()
+        self.services.save_day(day)
+        self.services.save_event_layout(event)
+        original = dataclasses.replace(
+            self.make_setup(day.id),
+            event_layout_id=event.id,
+            driver="Driver Two",
+            structured_settings_json='{"rear_spring_rate":"300","diff_preload":0}',
+        )
+        self.services.save_setup(original)
+
+        duplicate = self.services.duplicate_setup(original.id)
+
+        self.assertEqual(duplicate.event_layout_id, event.id)
+        self.assertEqual(duplicate.driver, "Driver Two")
+        self.assertEqual(
+            json.loads(duplicate.structured_settings_json),
+            {"rear_spring_rate": "300", "diff_preload": 0},
+        )
+        self.assertNotEqual(duplicate.id, original.id)
+        self.assertEqual(duplicate.order, 2)
+        self.assertEqual(self.services.list_attachments("setup", duplicate.id), [])
 
 
 if __name__ == "__main__":
