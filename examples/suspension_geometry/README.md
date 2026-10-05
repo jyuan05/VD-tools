@@ -52,14 +52,24 @@ These points are separate from the toe-link endpoints, `tie.inboard` and
 
 The studies include one-dimensional heave examples and a bounded 7 x 5 x 3
 heave/roll/pitch grid. Study file references are relative to each study file.
-After the command-line runner is available, the direct example can be checked
-and run with:
+The current CLI validates geometry, setup, and study configuration files. Study
+validation resolves the referenced geometry and setup, and checks the schemas,
+units, axes, and configured sample limits. For a setup with active anti-roll
+bars, pass its geometry file with `--geometry`; active bars require matching
+left and right axle-lever geometry. A setup without active anti-roll bars can
+be validated without a geometry file.
+
+Run these commands from the repository root:
 
 ```powershell
-uv run vd-suspension validate configs/suspension_geometry/geometries/synthetic_direct.yaml
-uv run vd-suspension run configs/suspension_geometry/studies/direct_heave.yaml --output outputs/suspension_geometry/direct-heave
+uv run --extra dev vd-suspension --help
+uv run --extra dev vd-suspension validate configs/suspension_geometry/geometries/synthetic_direct.yaml
+uv run --extra dev vd-suspension validate configs/suspension_geometry/studies/direct_heave.yaml --kind study
+uv run --extra dev vd-suspension validate configs/suspension_geometry/setups/synthetic_direct_loaded.yaml --kind setup --geometry configs/suspension_geometry/geometries/synthetic_direct.yaml
+uv run --extra dev python -m pytest -q
 ```
 
-The resulting map uses the configured rigid reference geometry and declared
-study boundary conditions. It does not imply static vehicle equilibrium,
-measured road contact, or validation against supplied vehicle hard points.
+The CLI does not compute numeric travel, run studies, or produce usable rate
+maps, plots, or exports yet. It checks that metric and plot names are listed,
+but does not check whether those names are supported. The fixtures and study
+grids are synthetic examples, not vehicle validation.
