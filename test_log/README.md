@@ -42,6 +42,13 @@ To reopen a backup, pass its timestamped folder as the data directory:
 
 This opens the snapshot in place. Copy the backup folder first if you want to keep an untouched copy.
 
+## Setup defaults and lap records
+
+A setup can hold an optional event/layout and driver default. Choose an active event/layout on the setup before adding a lap. New laps copy the setup’s event/layout and driver into their saved history; later setup changes apply to future laps only. Historical laps show their saved event/layout and driver as context.
+
+The setup editor keeps the freeform Settings and Notes fields and adds optional structured inputs in tabs. Blank vehicle values stay unset. Spring rates use lb/in, damping ratios are dimensionless, differential ramp angle uses degrees, differential preload uses ft-lb, camber and toe use degrees, tyre pressure uses PSI, and corner weight uses lb. Sprocket size is free text with no assumed unit. The dropdown guidance identifies the front-wing height order, rear-wing downforce order, and rear anti-roll-bar blade and motion-ratio order.
+
+Lap time is the only required lap entry. New laps start as valid; invalid remains selectable. Time of day, notes, and file attachments are optional. The CSV export keeps its existing columns and order.
 ## CSV columns
 
 A setup export uses these columns, in order:

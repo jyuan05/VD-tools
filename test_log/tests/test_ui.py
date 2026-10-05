@@ -63,7 +63,9 @@ class TestLogUiTests(unittest.TestCase):
             created_at=utc_now_iso(),
         )
 
-    def make_setup(self, day_id, name="Baseline", order=1):
+    def make_setup(
+        self, day_id, name="Baseline", order=1, event_layout_id=None, driver=None, structured_settings_json="{}"
+    ):
         return Setup(
             id=new_id(),
             test_day_id=day_id,
@@ -73,7 +75,18 @@ class TestLogUiTests(unittest.TestCase):
             notes="Keep the front settings",
             order=order,
             created_at=utc_now_iso(),
+            event_layout_id=event_layout_id,
+            driver=driver,
+            structured_settings_json=structured_settings_json,
         )
+
+    def label_texts(self, parent):
+        texts = []
+        for child in parent.winfo_children():
+            if isinstance(child, ttk.Label):
+                texts.append(child.cget("text"))
+            texts.extend(self.label_texts(child))
+        return texts
 
     def make_event(self, track="Test Site", layout="Short Loop", event_name="Handling Day"):
         return EventLayout(
@@ -147,14 +160,8 @@ class TestLogUiTests(unittest.TestCase):
             self.assertGreater(widget.winfo_height(), 0, f"{description} must have height")
             self.assertGreaterEqual(left, 0, f"{description} must stay inside the client")
             self.assertGreaterEqual(top, 0, f"{description} must stay inside the client")
-            self.assertLessEqual(
-                right, self.root.winfo_width(),
-                f"{description} must stay inside the client",
-            )
-            self.assertLessEqual(
-                bottom, self.root.winfo_height(),
-                f"{description} must stay inside the client",
-            )
+            self.assertLessEqual(right, self.root.winfo_width(), f"{description} must stay inside the client")
+            self.assertLessEqual(bottom, self.root.winfo_height(), f"{description} must stay inside the client")
             return left, top, right, bottom
 
         def overlaps(first, second):
@@ -174,8 +181,22 @@ class TestLogUiTests(unittest.TestCase):
 
                 tree_bounds = assert_inside_client(window.tree, "record tree")
                 attachment_bounds = assert_inside_client(window.attachment_list, "attachment list")
-                for name, widget in window.fields.items():
-                    assert_inside_client(widget, f"{name} field")
+                if item_id.startswith("setup:"):
+                    reachable_fields = set()
+                    for tab_id in window.setup_notebook.tabs():
+                        window.setup_notebook.select(tab_id)
+                        self.root.update()
+                        visible = {
+                            name for name, widget in window.fields.items() if widget.winfo_ismapped()
+                        }
+                        self.assertTrue(visible, "each setup tab must expose its fields")
+                        reachable_fields.update(visible)
+                        for name in visible:
+                            assert_inside_client(window.fields[name], f"{name} field")
+                    self.assertEqual(reachable_fields, set(window.fields))
+                else:
+                    for name, widget in window.fields.items():
+                        assert_inside_client(widget, f"{name} field")
                 for name, button in window.actions.items():
                     assert_inside_client(button, f"{name} button")
 
@@ -188,7 +209,6 @@ class TestLogUiTests(unittest.TestCase):
                 self.assertFalse(overlaps(status_bounds, tree_bounds))
                 self.assertFalse(overlaps(dirty_bounds, attachment_bounds))
                 self.assertFalse(overlaps(status_bounds, attachment_bounds))
-
     def test_add_day_setup_lap_callbacks_save_the_three_level_hierarchy(self):
         event = self.services.save_event_layout(self.make_event())
         window = self.require_window()
@@ -206,6 +226,8 @@ class TestLogUiTests(unittest.TestCase):
         window.actions["add_setup"].invoke()
         self.set_field(window.fields["name"], "Baseline")
         self.set_field(window.fields["setup_code"], "A01")
+        self.set_field(window.fields["event_layout_id"], window.event_choice_label(event.id))
+        self.set_field(window.fields["driver"], "Test Driver")
         self.set_field(window.fields["settings_text"], "Cold pressures: 20 psi")
         window.actions["save"].invoke()
         setup = self.services.list_setups(day.id)[0]
@@ -213,20 +235,20 @@ class TestLogUiTests(unittest.TestCase):
         self.select_tree_item(window.tree, f"setup:{setup.id}")
         window.actions["add_lap"].invoke()
         self.assertEqual(window.fields["lap_time"].get(), "")
-        self.assertEqual(window.fields["status"].get(), "")
+        self.assertEqual(window.fields["status"].get(), "valid")
+        self.assertNotIn("driver", window.fields)
+        self.assertNotIn("event_layout_id", window.fields)
         self.assertTrue(window.actions["move_lap_up"].instate(["disabled"]))
         self.assertTrue(window.actions["move_lap_down"].instate(["disabled"]))
         self.set_field(window.fields["lap_time"], "42.318")
-        self.set_field(window.fields["event_layout_id"], window.event_choice_label(event.id))
-        self.set_field(window.fields["status"], "valid")
         window.actions["save"].invoke()
         lap = self.services.list_laps(setup.id)[0]
 
         self.assertEqual((lap.setup_id, lap.event_layout_id, lap.time_ms), (setup.id, event.id, 42318))
+        self.assertEqual(lap.driver, "Test Driver")
         self.assertEqual(window.tree.parent(f"setup:{setup.id}"), f"day:{day.id}")
         self.assertEqual(window.tree.parent(f"lap:{lap.id}"), f"setup:{setup.id}")
         self.assertIn("BEST", window.tree.item(f"lap:{lap.id}", "text"))
-
     def test_canceling_dirty_selection_restores_selection_and_form_values(self):
         day = self.services.save_day(self.make_day())
         setup = self.services.save_setup(self.make_setup(day.id))
@@ -255,12 +277,12 @@ class TestLogUiTests(unittest.TestCase):
         window = self.require_window()
         self.select_tree_item(window.tree, f"lap:{lap.id}")
 
-        selected_label = window.event_choice_label(archived_event.id)
-        other_label = window.event_choice_label(other_archived.id)
-        self.assertTrue(selected_label)
-        self.assertNotIn(other_label, window.fields["event_layout_id"]["values"])
-        self.assertEqual(window.fields["event_layout_id"].get(), selected_label)
-
+        self.assertNotIn("driver", window.fields)
+        self.assertNotIn("event_layout_id", window.fields)
+        self.assertTrue(any(
+            "Old Layout" in label and "Driver" in label and "archived" in label.lower()
+            for label in self.label_texts(window._editor_frame)
+        ))
         window.fields["status"].set("invalid")
         window.actions["save"].invoke()
 
@@ -269,21 +291,18 @@ class TestLogUiTests(unittest.TestCase):
         self.assertEqual(saved.event_layout_id, archived_event.id)
         self.assertIn("INVALID", window.tree.item(f"lap:{lap.id}", "text"))
         self.assertNotIn("BEST", window.tree.item(f"lap:{lap.id}", "text"))
-
-    def test_failed_record_transaction_retains_fields_and_requires_reattachment(self):
+    def test_archived_setup_event_blocks_new_lap_without_losing_input_or_attachment(self):
+        stale_event = self.services.save_event_layout(self.make_event(layout="Archived Before Save"))
         day = self.services.save_day(self.make_day())
-        setup = self.services.save_setup(self.make_setup(day.id))
-        stale_event = self.services.save_event_layout(self.make_event(layout="Removed Before Save"))
+        setup = self.services.save_setup(
+            self.make_setup(day.id, event_layout_id=stale_event.id, driver="Test Driver")
+        )
         window = self.require_window()
         self.select_tree_item(window.tree, f"setup:{setup.id}")
         window.actions["add_lap"].invoke()
         self.assertEqual(window.fields["lap_time"].get(), "")
-        self.assertEqual(window.fields["status"].get(), "")
-        self.assertTrue(window.actions["move_lap_up"].instate(["disabled"]))
-        self.assertTrue(window.actions["move_lap_down"].instate(["disabled"]))
+        self.assertEqual(window.fields["status"].get(), "valid")
         self.set_field(window.fields["lap_time"], "42.318")
-        self.set_field(window.fields["event_layout_id"], window.event_choice_label(stale_event.id))
-        self.set_field(window.fields["status"], "valid")
 
         source = self.root_path / "lap-notes.txt"
         source.write_text("source remains", encoding="utf-8")
@@ -293,30 +312,15 @@ class TestLogUiTests(unittest.TestCase):
         stored_copy = self.paths.root / staged.relative_path
         self.assertTrue(stored_copy.is_file())
 
-        self.services.delete_event_layout(stale_event.id)
+        self.services.archive_event_layout(stale_event.id)
         window.actions["save"].invoke()
-        self.assertIn("Select an existing event/layout.", window._field_errors["event_layout_id"].cget("text"))
-        self.assertTrue(window.fields["lap_time"].get())
-        self.assertIn("reattach", window.status_label.cget("text").lower())
-        self.assertEqual(window.staged_attachments, [])
-        self.assertFalse(stored_copy.exists())
+
         self.assertEqual(self.services.list_laps(setup.id), [])
-
-        replacement_event = self.services.save_event_layout(self.make_event(layout="Replacement"))
-        window.refresh_tree()
+        self.assertIn("active event/layout", window.status_label.cget("text").lower())
         self.assertEqual(window.fields["lap_time"].get(), "42.318")
-        self.set_field(window.fields["event_layout_id"], window.event_choice_label(replacement_event.id))
-        with patch("tkinter.filedialog.askopenfilename", return_value=str(source)):
-            window.actions["attach_file"].invoke()
-        window.actions["save"].invoke()
-
-        saved_lap = self.services.list_laps(setup.id)[0]
-        attachments = self.services.list_attachments("lap", saved_lap.id)
-        self.assertEqual(saved_lap.event_layout_id, replacement_event.id)
-        self.assertEqual([attachment.original_name for attachment in attachments], ["lap-notes.txt"])
-        self.assertTrue(self.services.resolve_attachment(attachments[0]).is_file())
+        self.assertEqual(len(window.staged_attachments), 1)
+        self.assertTrue(stored_copy.is_file())
         self.assertEqual(source.read_text(encoding="utf-8"), "source remains")
-
     def test_event_library_creates_duplicates_and_freezes_referenced_history(self):
         day, setup, event, lap = self.save_hierarchy()
         window = self.require_window()
@@ -590,8 +594,14 @@ class TestLogUiTests(unittest.TestCase):
 
 
     def test_duplicate_setup_button_uses_the_service_duplicate(self):
+        event = self.services.save_event_layout(self.make_event())
         day = self.services.save_day(self.make_day())
-        setup = self.services.save_setup(self.make_setup(day.id))
+        setup = self.services.save_setup(self.make_setup(
+            day.id,
+            event_layout_id=event.id,
+            driver="Morgan",
+            structured_settings_json='{"front_wing_height":"5","corners":{"FL":{"pressure":20}}}',
+        ))
         window = self.require_window()
         self.select_tree_item(window.tree, f"setup:{setup.id}")
 
@@ -603,9 +613,18 @@ class TestLogUiTests(unittest.TestCase):
         self.assertEqual(duplicate.name, "Baseline (copy)")
         self.assertIsNone(duplicate.setup_code)
         self.assertEqual(duplicate.settings_text, setup.settings_text)
+        self.assertEqual(duplicate.event_layout_id, event.id)
+        self.assertEqual(duplicate.driver, "Morgan")
+        self.assertEqual(
+            duplicate.structured_settings_json,
+            '{"corners":{"FL":{"pressure":20}},"front_wing_height":"5"}',
+        )
+        self.assertEqual(window.fields["event_layout_id"].get(), window.event_choice_label(event.id))
+        self.assertEqual(window.fields["driver"].get(), "Morgan")
+        self.assertEqual(window.fields["front_wing_height"].get(), "5")
+        self.assertEqual(window.fields["FL_pressure"].get(), "20")
         self.assertEqual(duplicate.order, 2)
         self.assertTrue(window.tree.exists(f"setup:{duplicate.id}"))
-
     def test_identical_event_labels_keep_distinct_internal_ids(self):
         day = self.services.save_day(self.make_day())
         setup = self.services.save_setup(self.make_setup(day.id))
@@ -637,7 +656,6 @@ class TestLogUiTests(unittest.TestCase):
         self.services.save_event_layout(second)
         window = self.require_window()
         self.select_tree_item(window.tree, f"setup:{setup.id}")
-        window.actions["add_lap"].invoke()
 
         values = tuple(window.fields["event_layout_id"]["values"])
         first_label = window.event_choice_label(first.id)
@@ -646,11 +664,12 @@ class TestLogUiTests(unittest.TestCase):
         self.assertEqual(len(set(values)), 2)
         self.assertNotEqual(first_label, second_label)
         self.set_field(window.fields["event_layout_id"], first_label)
+        window.actions["save"].invoke()
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        window.actions["add_lap"].invoke()
         self.set_field(window.fields["lap_time"], "42.318")
-        self.set_field(window.fields["status"], "valid")
         window.actions["save"].invoke()
         self.assertEqual(self.services.list_laps(setup.id)[0].event_layout_id, first.id)
-
     def test_canceling_close_keeps_dirty_editor_open(self):
         day = self.services.save_day(self.make_day())
         window = self.require_window()
@@ -692,6 +711,320 @@ class TestLogUiTests(unittest.TestCase):
         self.assertTrue(manager.winfo_exists())
         self.assertEqual(manager.fields["track_name"].get(), "Unsaved track")
 
+
+    def test_setup_editor_exposes_setup_defaults_and_structured_fields(self):
+        day = self.services.save_day(self.make_day())
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"day:{day.id}")
+        window.actions["add_setup"].invoke()
+
+        expected_fields = (
+            "event_layout_id",
+            "driver",
+            "front_wing_height",
+            "front_spring_rate",
+            "front_damping_ratio",
+            "rw_setting",
+            "sprocket_size",
+            "rear_spring_rate",
+            "rear_damping_ratio",
+            "diff_ramp_angle",
+            "diff_preload",
+            "rear_arb_blade_setting",
+            "rear_arb_motion_ratio_setting",
+            "FL_camber",
+            "FL_toe",
+            "FL_pressure",
+            "FL_corner_weight",
+            "FR_camber",
+            "FR_toe",
+            "FR_pressure",
+            "FR_corner_weight",
+            "RL_camber",
+            "RL_toe",
+            "RL_pressure",
+            "RL_corner_weight",
+            "RR_camber",
+            "RR_toe",
+            "RR_pressure",
+            "RR_corner_weight",
+        )
+        for field in expected_fields:
+            with self.subTest(field=field):
+                self.assertIn(field, window.fields)
+
+
+    def test_setup_editor_saves_optional_vehicle_values_and_exact_choices(self):
+        import json
+
+        event = self.services.save_event_layout(self.make_event())
+        day = self.services.save_day(self.make_day())
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"day:{day.id}")
+        window.actions["add_setup"].invoke()
+
+        expected_choices = {
+            "front_wing_height": ("", "1", "2", "3", "4", "5"),
+            "front_spring_rate": ("", "200", "250", "300", "350"),
+            "rw_setting": ("", "1", "2", "3", "LD"),
+            "rear_spring_rate": ("", "200", "250", "300", "350"),
+            "rear_arb_blade_setting": ("", "1", "2", "3", "4", "5", "6", "OFF"),
+            "rear_arb_motion_ratio_setting": ("", "MR1", "MR2"),
+        }
+        for field, choices in expected_choices.items():
+            with self.subTest(field=field):
+                self.assertIsInstance(window.fields[field], ttk.Combobox)
+                self.assertEqual(tuple(window.fields[field]["values"]), choices)
+
+        self.set_field(window.fields["name"], "Rain setup")
+        self.set_field(window.fields["setup_code"], "R02")
+        self.set_field(window.fields["event_layout_id"], window.event_choice_label(event.id))
+        self.set_field(window.fields["driver"], "Morgan")
+        self.set_field(window.fields["settings_text"], "Spring perch notes from the crew.")
+        self.set_field(window.fields["notes"], "Freeform setup note stays available.")
+        input_values = {
+            "front_wing_height": "5",
+            "front_spring_rate": "300",
+            "front_damping_ratio": "0.82",
+            "rw_setting": "LD",
+            "sprocket_size": "15/42",
+            "rear_spring_rate": "250",
+            "rear_damping_ratio": "0.65",
+            "diff_ramp_angle": "45",
+            "diff_preload": "5.5",
+            "rear_arb_blade_setting": "OFF",
+            "rear_arb_motion_ratio_setting": "MR2",
+            "FL_camber": "-1.1",
+            "FL_toe": "0.05",
+            "FL_pressure": "20",
+            "FL_corner_weight": "180",
+            "FR_camber": "-1.2",
+            "FR_toe": "-0.04",
+            "FR_pressure": "20.5",
+            "FR_corner_weight": "181",
+            "RL_camber": "-1.4",
+            "RL_toe": "0.01",
+            "RL_pressure": "21",
+            "RL_corner_weight": "178",
+            "RR_camber": "-1.5",
+            "RR_toe": "-0.02",
+            "RR_pressure": "21.5",
+            "RR_corner_weight": "179",
+        }
+        for field, value in input_values.items():
+            self.set_field(window.fields[field], value)
+
+        window.actions["save"].invoke()
+        saved = self.services.list_setups(day.id)[0]
+        self.assertEqual(saved.event_layout_id, event.id)
+        self.assertEqual(saved.driver, "Morgan")
+        self.assertEqual(saved.settings_text, "Spring perch notes from the crew.")
+        self.assertEqual(saved.notes, "Freeform setup note stays available.")
+        self.assertEqual(
+            json.loads(saved.structured_settings_json),
+            {
+                "front_wing_height": "5",
+                "front_spring_rate": "300",
+                "front_damping_ratio": 0.82,
+                "rw_setting": "LD",
+                "sprocket_size": "15/42",
+                "rear_spring_rate": "250",
+                "rear_damping_ratio": 0.65,
+                "diff_ramp_angle": 45.0,
+                "diff_preload": 5.5,
+                "rear_arb_blade_setting": "OFF",
+                "rear_arb_motion_ratio_setting": "MR2",
+                "corners": {
+                    "FL": {"camber": -1.1, "toe": 0.05, "pressure": 20.0, "corner_weight": 180.0},
+                    "FR": {"camber": -1.2, "toe": -0.04, "pressure": 20.5, "corner_weight": 181.0},
+                    "RL": {"camber": -1.4, "toe": 0.01, "pressure": 21.0, "corner_weight": 178.0},
+                    "RR": {"camber": -1.5, "toe": -0.02, "pressure": 21.5, "corner_weight": 179.0},
+                },
+            },
+        )
+
+        self.select_tree_item(window.tree, f"day:{day.id}")
+        self.select_tree_item(window.tree, f"setup:{saved.id}")
+        for field, value in input_values.items():
+            with self.subTest(reopened_field=field):
+                self.assertEqual(window.fields[field].get(), value)
+        self.assertEqual(window.fields["event_layout_id"].get(), window.event_choice_label(event.id))
+        self.assertEqual(window.fields["driver"].get(), "Morgan")
+        self.assertEqual(window.fields["settings_text"].get("1.0", "end-1c"), "Spring perch notes from the crew.")
+        self.assertEqual(window.fields["notes"].get("1.0", "end-1c"), "Freeform setup note stays available.")
+        labels = self.label_texts(window._editor_frame)
+        for expected_label in (
+            "Front wing height (1 = lowest)",
+            "Front spring rate (lb/in)",
+            "Front damping ratio (dimensionless)",
+            "Rear damping ratio (dimensionless)",
+            "RW setting (1 = highest downforce)",
+            "Diff ramp angle (degrees)",
+            "Diff preload (ft-lb)",
+            "Camber (degrees)",
+            "Toe (degrees)",
+            "Pressure (PSI)",
+            "Corner weight (lb)",
+            "Rear ARB blade (1 = stiffest, 6 = softest)",
+            "Rear ARB motion ratio (MR1 = softer)",
+        ):
+            self.assertIn(expected_label, labels)
+
+    def test_setup_editor_saves_with_blank_optional_defaults_and_vehicle_fields(self):
+        day = self.services.save_day(self.make_day())
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"day:{day.id}")
+        window.actions["add_setup"].invoke()
+        self.set_field(window.fields["name"], "Unconfigured")
+
+        window.actions["save"].invoke()
+
+        setup = self.services.list_setups(day.id)[0]
+        self.assertIsNone(setup.event_layout_id)
+        self.assertIsNone(setup.driver)
+        self.assertEqual(setup.structured_settings_json, "{}")
+        for field in (
+            "front_wing_height", "front_spring_rate", "front_damping_ratio", "rw_setting", "sprocket_size",
+            "rear_spring_rate", "rear_damping_ratio", "diff_ramp_angle", "diff_preload",
+            "rear_arb_blade_setting", "rear_arb_motion_ratio_setting",
+            "FL_camber", "FL_toe", "FL_pressure", "FL_corner_weight",
+            "FR_camber", "FR_toe", "FR_pressure", "FR_corner_weight",
+            "RL_camber", "RL_toe", "RL_pressure", "RL_corner_weight",
+            "RR_camber", "RR_toe", "RR_pressure", "RR_corner_weight",
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(window.fields[field].get(), "")
+
+    def test_new_lap_requires_only_time_and_inherits_setup_defaults(self):
+        event = self.services.save_event_layout(self.make_event())
+        day = self.services.save_day(self.make_day())
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"day:{day.id}")
+        window.actions["add_setup"].invoke()
+        self.set_field(window.fields["name"], "Baseline")
+        self.set_field(window.fields["event_layout_id"], window.event_choice_label(event.id))
+        self.set_field(window.fields["driver"], "Alex")
+        window.actions["save"].invoke()
+        setup = self.services.list_setups(day.id)[0]
+
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        window.actions["add_lap"].invoke()
+        self.assertEqual(set(window.fields), {"lap_time", "status", "time_of_day", "notes"})
+        self.assertEqual(window.fields["status"].get(), "valid")
+        self.assertEqual(tuple(window.fields["status"]["values"]), ("valid", "invalid"))
+        self.assertTrue(any(
+            "Event / layout:" in label and event.layout_name in label and "Driver: Alex" in label
+            for label in self.label_texts(window._editor_frame)
+        ))
+        self.set_field(window.fields["lap_time"], "42.318")
+
+        window.actions["save"].invoke()
+
+        lap = self.services.list_laps(setup.id)[0]
+        self.assertEqual((lap.event_layout_id, lap.driver, lap.status, lap.time_ms), (event.id, "Alex", "valid", 42318))
+        self.assertIsNone(lap.time_of_day)
+        self.assertIsNone(lap.notes)
+
+    def test_new_lap_saves_time_of_day_notes_and_attachment(self):
+        event = self.services.save_event_layout(self.make_event())
+        day = self.services.save_day(self.make_day())
+        setup = self.services.save_setup(self.make_setup(day.id, event_layout_id=event.id, driver="Alex"))
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        window.actions["add_lap"].invoke()
+        self.set_field(window.fields["lap_time"], "42.318")
+        self.set_field(window.fields["time_of_day"], "10:34")
+        self.set_field(window.fields["notes"], "Dry line at the apex")
+        source = self.root_path / "new-lap-evidence.txt"
+        source.write_text("new lap trace", encoding="utf-8")
+        with patch("tkinter.filedialog.askopenfilename", return_value=str(source)):
+            window.actions["attach_file"].invoke()
+
+        window.actions["save"].invoke()
+
+        lap = self.services.list_laps(setup.id)[0]
+        self.assertEqual((lap.status, lap.time_of_day, lap.notes), ("valid", "10:34", "Dry line at the apex"))
+        self.assertEqual((lap.event_layout_id, lap.driver), (event.id, "Alex"))
+        attachments = self.services.list_attachments("lap", lap.id)
+        self.assertEqual([item.original_name for item in attachments], ["new-lap-evidence.txt"])
+        self.assertEqual(self.services.resolve_attachment(attachments[0]).read_text(encoding="utf-8"), "new lap trace")
+        self.assertEqual(source.read_text(encoding="utf-8"), "new lap trace")
+
+    def test_new_lap_without_active_setup_event_is_blocked(self):
+        day = self.services.save_day(self.make_day())
+        setup = self.services.save_setup(self.make_setup(day.id))
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        window.actions["add_lap"].invoke()
+        self.set_field(window.fields["lap_time"], "42.318")
+
+        window.actions["save"].invoke()
+
+        self.assertEqual(self.services.list_laps(setup.id), [])
+        self.assertIn("active event/layout", window.status_label.cget("text").lower())
+        self.assertEqual(window.fields["lap_time"].get(), "42.318")
+
+    def test_historical_lap_edit_keeps_snapshot_optional_fields_and_attachment(self):
+        old_event = self.services.save_event_layout(self.make_event(layout="Old Layout", event_name="Old Test"))
+        new_event = self.services.save_event_layout(self.make_event(layout="New Layout", event_name="New Test"))
+        day = self.services.save_day(self.make_day())
+        setup = self.services.save_setup(self.make_setup(day.id, event_layout_id=old_event.id, driver="Old Driver"))
+        lap = Lap(
+            id=new_id(), setup_id=setup.id, event_layout_id=old_event.id, sequence=1,
+            time_ms=42318, status="invalid", driver="Old Driver", time_of_day="09:15",
+            notes="Keep the original lap notes", created_at=utc_now_iso(),
+        )
+        lap = self.services.save_lap(lap)
+        source = self.root_path / "old-lap-evidence.txt"
+        source.write_text("historical trace", encoding="utf-8")
+        staged = self.services.stage_attachment(source, "file")
+        self.services.save_lap(lap, (staged,))
+        original_attachments = self.services.list_attachments("lap", lap.id)
+        self.services.archive_event_layout(old_event.id)
+
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        self.set_field(window.fields["event_layout_id"], window.event_choice_label(new_event.id))
+        self.set_field(window.fields["driver"], "New Driver")
+        window.actions["save"].invoke()
+
+        self.select_tree_item(window.tree, f"lap:{lap.id}")
+        self.assertEqual(set(window.fields), {"lap_time", "status", "time_of_day", "notes"})
+        self.assertEqual(window.fields["lap_time"].get(), "0:42.318")
+        self.assertEqual(window.fields["status"].get(), "invalid")
+        self.assertEqual(window.fields["time_of_day"].get(), "09:15")
+        self.assertEqual(window.fields["notes"].get("1.0", "end-1c"), "Keep the original lap notes")
+        self.assertTrue(any(
+            "Old Layout" in label and "Old Driver" in label and "archived" in label.lower()
+            for label in self.label_texts(window._editor_frame)
+        ))
+        self.set_field(window.fields["lap_time"], "42.500")
+        window.actions["save"].invoke()
+
+        saved = self.services.get_lap(lap.id)
+        self.assertEqual(
+            (saved.event_layout_id, saved.driver, saved.status, saved.time_of_day, saved.notes, saved.time_ms),
+            (old_event.id, "Old Driver", "invalid", "09:15", "Keep the original lap notes", 42500),
+        )
+        saved_attachments = self.services.list_attachments("lap", lap.id)
+        self.assertEqual(saved_attachments, original_attachments)
+        self.assertEqual(self.services.resolve_attachment(saved_attachments[0]).read_text(encoding="utf-8"), "historical trace")
+
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        window.actions["add_lap"].invoke()
+        self.assertEqual(window.fields["status"].get(), "valid")
+        self.assertTrue(any(
+            "New Layout" in label and "New Driver" in label
+            for label in self.label_texts(window._editor_frame)
+        ))
+        self.set_field(window.fields["lap_time"], "42.600")
+        window.actions["save"].invoke()
+
+        next_lap = self.services.list_laps(setup.id)[-1]
+        self.assertEqual(
+            (next_lap.event_layout_id, next_lap.driver, next_lap.status, next_lap.time_ms),
+            (new_event.id, "New Driver", "valid", 42600),
+        )
 
 if __name__ == "__main__":
     unittest.main()

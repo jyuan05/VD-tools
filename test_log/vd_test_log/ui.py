@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import tkinter as tk
 from pathlib import Path
@@ -9,8 +11,49 @@ from tkinter import filedialog, messagebox, ttk
 
 from .event_ui import EventLayoutManager
 from .models import EventLayout, Lap, Setup, StagedAttachment, TestDay, new_id, utc_now_iso
+from .setup_settings import (
+    CORNERS,
+    CORNER_FIELDS,
+    NUMERIC_SETUP_FIELDS,
+    SETUP_CHOICES,
+    normalise_setup_settings_json,
+)
 from .time_value import format_lap_time, parse_lap_time
 from .validation import ValidationError
+
+
+_SETUP_TOP_LEVEL_FIELDS = (
+    "front_wing_height", "front_spring_rate", "front_damping_ratio", "rw_setting",
+    "sprocket_size", "rear_spring_rate", "rear_damping_ratio", "diff_ramp_angle",
+    "diff_preload", "rear_arb_blade_setting", "rear_arb_motion_ratio_setting",
+)
+
+_SETUP_TAB_FIELDS = {
+    "Aero": (
+        ("front_wing_height", "Front wing height (1 = lowest)"),
+        ("rw_setting", "RW setting (1 = highest downforce)"),
+        ("sprocket_size", "Sprocket size"),
+    ),
+    "Suspension": (
+        ("front_spring_rate", "Front spring rate (lb/in)"),
+        ("front_damping_ratio", "Front damping ratio (dimensionless)"),
+        ("rear_spring_rate", "Rear spring rate (lb/in)"),
+        ("rear_damping_ratio", "Rear damping ratio (dimensionless)"),
+    ),
+    "Diff + ARB": (
+        ("diff_ramp_angle", "Diff ramp angle (degrees)"),
+        ("diff_preload", "Diff preload (ft-lb)"),
+        ("rear_arb_blade_setting", "Rear ARB blade (1 = stiffest, 6 = softest)"),
+        ("rear_arb_motion_ratio_setting", "Rear ARB motion ratio (MR1 = softer)"),
+    ),
+}
+
+_CORNER_FIELD_LABELS = {
+    "camber": "Camber (degrees)",
+    "toe": "Toe (degrees)",
+    "pressure": "Pressure (PSI)",
+    "corner_weight": "Corner weight (lb)",
+}
 
 
 class TestLogWindow:
@@ -27,6 +70,8 @@ class TestLogWindow:
         self.dirty_label: ttk.Label | None = None
         self.event_manager: EventLayoutManager | None = None
         self._editor_frame: ttk.Frame | None = None
+        self.setup_notebook: ttk.Notebook | None = None
+        self.lap_context_label: ttk.Label | None = None
         self._current_kind: str | None = None
         self._record: TestDay | Setup | Lap | None = None
         self._is_new = False
@@ -56,9 +101,11 @@ class TestLogWindow:
         self.root.geometry("1180x720")
         self.root.minsize(900, 630)
         self.root.protocol("WM_DELETE_WINDOW", self.close_request)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
 
         toolbar = ttk.Frame(self.root, padding=(8, 8, 8, 4))
-        toolbar.pack(fill="x")
+        toolbar.grid(row=0, column=0, sticky="ew")
         button_specs = (
             ("add_day", "Add Test Day", self.add_day),
             ("add_setup", "Add Setup", self.add_setup),
@@ -84,7 +131,7 @@ class TestLogWindow:
             toolbar.columnconfigure(column, weight=1)
 
         body = ttk.Panedwindow(self.root, orient="horizontal")
-        body.pack(fill="both", expand=True, padx=8, pady=4)
+        body.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
         tree_frame = ttk.Frame(body, padding=(0, 0, 8, 0))
         self._editor_frame = ttk.Frame(body, padding=(8, 0, 0, 0))
         body.add(tree_frame, weight=1)
@@ -98,7 +145,7 @@ class TestLogWindow:
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         bottom = ttk.Frame(self.root, padding=(8, 4, 8, 8))
-        bottom.pack(fill="x")
+        bottom.grid(row=2, column=0, sticky="ew")
         self.dirty_label = ttk.Label(bottom, text="")
         self.dirty_label.pack(side="left", padx=(0, 12))
         self.status_label = ttk.Label(bottom, text="", anchor="w", wraplength=950)
@@ -122,7 +169,7 @@ class TestLogWindow:
         if choices is not None:
             widget = ttk.Combobox(parent, values=choices, state="readonly")
         elif multiline:
-            widget = tk.Text(parent, height=4 if key != "settings_text" else 8, width=38, wrap="word")
+            widget = tk.Text(parent, height=4, width=38, wrap="word")
         else:
             widget = ttk.Entry(parent)
         widget.grid(row=row, column=1, sticky="ew", pady=5)
@@ -146,6 +193,8 @@ class TestLogWindow:
         self.fields = {}
         self._field_errors = {}
         self._attachment_refs = []
+        self.setup_notebook = None
+        self.lap_context_label = None
         self._current_kind = kind
         self._record = record
         self._is_new = is_new
@@ -176,38 +225,83 @@ class TestLogWindow:
         ttk.Label(panel, text=("New " if is_new else "Edit ") + title, font=("Segoe UI", 12, "bold")).grid(
             row=0, column=0, sticky="w", pady=(0, 6)
         )
-        body = ttk.Frame(panel)
-        body.grid(row=1, column=0, sticky="nsew")
-        body.columnconfigure(1, weight=1)
-        row = 0
-        if kind == "day":
-            values = self._day_values(record) if record is not None else {}
-            row = self._add_form_field(body, "date", "Date (YYYY-MM-DD)", row)
-            row = self._add_form_field(body, "location", "Location", row)
-            row = self._add_form_field(body, "weather", "Weather", row)
-            row = self._add_form_field(body, "notes", "Notes", row, multiline=True)
-        elif kind == "setup":
-            values = self._setup_values(record) if record is not None else {}
-            row = self._add_form_field(body, "name", "Setup label", row)
-            row = self._add_form_field(body, "setup_code", "Setup ID", row)
-            row = self._add_form_field(body, "settings_text", "Settings", row, multiline=True)
-            row = self._add_form_field(body, "notes", "Notes", row, multiline=True)
-        else:
-            values = self._lap_values(record) if record is not None else {}
-            row = self._add_form_field(body, "lap_time", "Lap time (seconds or m:ss.sss)", row)
-            row = self._add_form_field(body, "status", "Status", row, choices=("valid", "invalid"))
-            row = self._add_form_field(body, "driver", "Driver", row)
-            row = self._add_form_field(body, "time_of_day", "Time of day", row)
-            row = self._add_form_field(body, "event_layout_id", "Event / layout", row, choices=())
-            row = self._add_form_field(body, "notes", "Notes", row, multiline=True)
-            self._populate_event_choices(record)
-        self._set_form_values(values or {})
-        if kind == "lap":
+
+        if kind == "setup":
+            notebook = ttk.Notebook(panel)
+            notebook.grid(row=1, column=0, sticky="nsew")
+            self.setup_notebook = notebook
+
+            general = ttk.Frame(notebook, padding=(8, 4))
+            general.columnconfigure(1, weight=1)
+            notebook.add(general, text="General")
+            row = 0
+            row = self._add_form_field(general, "name", "Setup label", row)
+            row = self._add_form_field(general, "setup_code", "Setup ID", row)
+            row = self._add_form_field(general, "event_layout_id", "Default event / layout", row, choices=())
+            row = self._add_form_field(general, "driver", "Default driver", row)
+            row = self._add_form_field(general, "settings_text", "Settings", row, multiline=True)
+            self._add_form_field(general, "notes", "Notes", row, multiline=True)
             self._populate_event_choices(record, preserve_value=False)
+            values = self._setup_values(record) if record is not None else {}
+
+            for tab_name, specifications in _SETUP_TAB_FIELDS.items():
+                page = ttk.Frame(notebook, padding=(8, 4))
+                page.columnconfigure(1, weight=1)
+                notebook.add(page, text=tab_name)
+                row = 0
+                for field, label in specifications:
+                    choices = ("",) + SETUP_CHOICES[field] if field in SETUP_CHOICES else None
+                    row = self._add_form_field(page, field, label, row, choices=choices)
+
+            corners_page = ttk.Frame(notebook, padding=4)
+            corners_page.columnconfigure(0, weight=1)
+            corners_page.columnconfigure(1, weight=1)
+            corners_page.rowconfigure(0, weight=1)
+            corners_page.rowconfigure(1, weight=1)
+            notebook.add(corners_page, text="Corners")
+            for index, corner in enumerate(CORNERS):
+                group = ttk.LabelFrame(corners_page, text=corner, padding=4)
+                group.grid(row=index // 2, column=index % 2, sticky="nsew", padx=3, pady=3)
+                group.columnconfigure(1, weight=1)
+                row = 0
+                for field in CORNER_FIELDS:
+                    row = self._add_form_field(
+                        group,
+                        f"{corner}_{field}",
+                        _CORNER_FIELD_LABELS[field],
+                        row,
+                    )
+            self._set_form_values(values or {})
+        else:
+            body = ttk.Frame(panel, padding=(8, 0))
+            body.grid(row=1, column=0, sticky="nsew")
+            body.columnconfigure(1, weight=1)
+            row = 0
+            if kind == "day":
+                values = self._day_values(record) if record is not None else {}
+                row = self._add_form_field(body, "date", "Date (YYYY-MM-DD)", row)
+                row = self._add_form_field(body, "location", "Location", row)
+                row = self._add_form_field(body, "weather", "Weather", row)
+                row = self._add_form_field(body, "notes", "Notes", row, multiline=True)
+            else:
+                self.lap_context_label = ttk.Label(
+                    body,
+                    text=self._lap_context_text(record, context_id, is_new=is_new),
+                    wraplength=520,
+                    justify="left",
+                )
+                self.lap_context_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+                values = self._lap_values(record) if record is not None else {"status": "valid"}
+                row = 1
+                row = self._add_form_field(body, "lap_time", "Lap time (seconds or m:ss.sss)", row)
+                row = self._add_form_field(body, "status", "Status", row, choices=("valid", "invalid"))
+                row = self._add_form_field(body, "time_of_day", "Time of day", row)
+                self._add_form_field(body, "notes", "Notes", row, multiline=True)
+            self._set_form_values(values or {})
 
         attachment_frame = ttk.LabelFrame(panel, text="Attachments", padding=6)
         attachment_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 4))
-        self.attachment_list = tk.Listbox(attachment_frame, height=5, exportselection=False)
+        self.attachment_list = tk.Listbox(attachment_frame, height=4, exportselection=False)
         self.attachment_list.pack(fill="both", expand=True)
         self._refresh_attachment_list()
         self._loaded_values = self._capture_values()
@@ -223,20 +317,38 @@ class TestLogWindow:
         }
 
     def _setup_values(self, record: Setup) -> dict[str, str]:
-        return {
+        settings = json.loads(record.structured_settings_json or "{}")
+        values = {
             "name": record.name,
             "setup_code": record.setup_code or "",
+            "event_layout_id": self._event_label_by_id.get(record.event_layout_id or "", ""),
+            "driver": record.driver or "",
             "settings_text": record.settings_text,
             "notes": record.notes or "",
         }
+        for field in _SETUP_TOP_LEVEL_FIELDS:
+            values[field] = self._setup_setting_text(settings.get(field))
+        corners = settings.get("corners", {})
+        for corner in CORNERS:
+            corner_settings = corners.get(corner, {}) if isinstance(corners, dict) else {}
+            for field in CORNER_FIELDS:
+                raw_value = corner_settings.get(field) if isinstance(corner_settings, dict) else None
+                values[f"{corner}_{field}"] = self._setup_setting_text(raw_value)
+        return values
+
+    @staticmethod
+    def _setup_setting_text(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
 
     def _lap_values(self, record: Lap) -> dict[str, str]:
         return {
             "lap_time": format_lap_time(record.time_ms),
             "status": record.status,
-            "driver": record.driver or "",
             "time_of_day": record.time_of_day or "",
-            "event_layout_id": "",
             "notes": record.notes or "",
         }
 
@@ -287,20 +399,23 @@ class TestLogWindow:
         value = value.strip()
         return value or None
 
-    def _populate_event_choices(self, record: Lap | None, *, preserve_value=True) -> None:
+    def _populate_event_choices(self, record: Setup | Lap | None, *, preserve_value=True) -> None:
         widget = self.fields.get("event_layout_id")
         if not isinstance(widget, ttk.Combobox):
             return
         current_value = widget.get() if preserve_value else ""
+        selected_id = record.event_layout_id if record is not None else None
         events = self.services.list_event_layouts(include_archived=False)
-        if record is not None:
-            selected = self.services.get_event_layout(record.event_layout_id)
+        if selected_id:
+            selected = self.services.get_event_layout(selected_id)
             if selected is not None and selected.archived and selected not in events:
                 events.append(selected)
-        displays = [
-            (f"{event.event_name + ' · ' if event.event_name else ''}{event.track_name} / {event.layout_name}", event.id)
-            for event in events
-        ]
+        displays = []
+        for event in events:
+            label = f"{event.event_name + ' · ' if event.event_name else ''}{event.track_name} / {event.layout_name}"
+            if event.archived:
+                label += " [Archived]"
+            displays.append((label, event.id))
         counts: dict[str, int] = {}
         for display, _identifier in displays:
             counts[display] = counts.get(display, 0) + 1
@@ -315,8 +430,8 @@ class TestLogWindow:
         widget.configure(values=labels)
         if current_value:
             widget.set(current_value)
-        elif record is not None:
-            widget.set(self._event_label_by_id.get(record.event_layout_id, ""))
+        elif selected_id:
+            widget.set(self._event_label_by_id.get(selected_id, ""))
         else:
             widget.set("")
 
@@ -325,9 +440,33 @@ class TestLogWindow:
         return self._event_label_by_id.get(identifier)
 
     def _refresh_event_choices(self) -> None:
-        if self._current_kind == "lap":
-            record = self._record if isinstance(self._record, Lap) else None
+        if self._current_kind == "setup":
+            record = self._record if isinstance(self._record, Setup) else None
             self._populate_event_choices(record)
+
+    def _event_context_text(self, event_id: str | None) -> str:
+        if not event_id:
+            return "Not set"
+        event = self.services.get_event_layout(event_id)
+        if event is None:
+            return "Unknown event/layout"
+        label = f"{event.event_name + ' · ' if event.event_name else ''}{event.track_name} / {event.layout_name}"
+        return label + (" [Archived]" if event.archived else "")
+
+    def _lap_context_text(self, record: Lap | None, setup_id: str | None, *, is_new: bool) -> str:
+        if is_new:
+            setup = self.services.get_setup(setup_id) if setup_id else None
+            event_id = setup.event_layout_id if setup is not None else None
+            driver = setup.driver if setup is not None else None
+            prefix = "New lap inherits setup defaults"
+        else:
+            event_id = record.event_layout_id if record is not None else None
+            driver = record.driver if record is not None else None
+            prefix = "Lap history snapshot"
+        return (
+            f"{prefix} · Event / layout: {self._event_context_text(event_id)}"
+            f" · Driver: {driver or 'Not set'}"
+        )
 
     def _tree_item_for_current(self) -> str | None:
         if self._current_kind is None:
@@ -603,6 +742,43 @@ class TestLogWindow:
         self._show_editor("setup", duplicate, is_new=False)
         self._set_status("Setup duplicated. Review its details and save any changes.")
 
+    def _setup_settings_json(self, values: dict[str, str]) -> str:
+        settings: dict[str, object] = {}
+        for field in _SETUP_TOP_LEVEL_FIELDS:
+            raw_value = values.get(field, "").strip()
+            if not raw_value:
+                continue
+            if field in SETUP_CHOICES or field == "sprocket_size":
+                settings[field] = raw_value
+            else:
+                settings[field] = self._finite_setup_number(field, raw_value)
+        corner_settings: dict[str, dict[str, float]] = {}
+        for corner in CORNERS:
+            saved_corner: dict[str, float] = {}
+            for field in CORNER_FIELDS:
+                key = f"{corner}_{field}"
+                raw_value = values.get(key, "").strip()
+                if raw_value:
+                    saved_corner[field] = self._finite_setup_number(key, raw_value)
+            if saved_corner:
+                corner_settings[corner] = saved_corner
+        if corner_settings:
+            settings["corners"] = corner_settings
+        serialized = json.dumps(settings, allow_nan=False, separators=(",", ":"), sort_keys=True)
+        return normalise_setup_settings_json(serialized)
+
+    def _finite_setup_number(self, field: str, value: str) -> float:
+        corner_numeric_fields = {f"{corner}_{name}" for corner in CORNERS for name in CORNER_FIELDS}
+        if field not in NUMERIC_SETUP_FIELDS and field not in corner_numeric_fields:
+            raise ValidationError(field, "Enter a finite numeric value.")
+        try:
+            number = float(value)
+        except ValueError as error:
+            raise ValidationError(field, "Enter a finite numeric value.") from error
+        if not math.isfinite(number):
+            raise ValidationError(field, "Enter a finite numeric value.")
+        return number
+
     def _new_record_values(self, kind: str):
         identifier = new_id()
         timestamp = utc_now_iso()
@@ -623,6 +799,7 @@ class TestLogWindow:
             if day_id is None:
                 raise ValidationError("test_day_id", "Select a test day for this setup.")
             existing = self.services.list_setups(day_id)
+            event_id = self._event_id_by_label.get(values.get("event_layout_id", ""))
             return Setup(
                 id=existing_record.id if existing_record else identifier,
                 test_day_id=day_id,
@@ -632,24 +809,38 @@ class TestLogWindow:
                 notes=self._optional(values["notes"]),
                 order=existing_record.order if existing_record else len(existing) + 1,
                 created_at=existing_record.created_at if existing_record else timestamp,
+                event_layout_id=event_id,
+                driver=self._optional(values["driver"]),
+                structured_settings_json=self._setup_settings_json(values),
             )
         if kind == "lap":
             existing_record = self._record if isinstance(self._record, Lap) else None
             setup_id = existing_record.setup_id if existing_record else self._context_id
             if setup_id is None:
                 raise ValidationError("setup_id", "Select a setup for this lap.")
-            event_id = self._event_id_by_label.get(values["event_layout_id"])
-            if not event_id:
-                raise ValidationError("event_layout_id", "Choose an active event/layout.")
+            time_ms = parse_lap_time(values["lap_time"])
+            if existing_record is not None:
+                event_id = existing_record.event_layout_id
+                driver = existing_record.driver
+            else:
+                setup = self.services.get_setup(setup_id)
+                event_id = setup.event_layout_id if setup is not None else None
+                driver = setup.driver if setup is not None else None
+                event = self.services.get_event_layout(event_id) if event_id else None
+                if event is None or event.archived:
+                    raise ValidationError(
+                        "event_layout_id",
+                        "Choose an active event/layout on this setup before adding a lap.",
+                    )
             existing = self.services.list_laps(setup_id)
             return Lap(
                 id=existing_record.id if existing_record else identifier,
                 setup_id=setup_id,
                 event_layout_id=event_id,
                 sequence=existing_record.sequence if existing_record else len(existing) + 1,
-                time_ms=parse_lap_time(values["lap_time"]),
+                time_ms=time_ms,
                 status=values["status"],
-                driver=self._optional(values["driver"]),
+                driver=driver,
                 time_of_day=self._optional(values["time_of_day"]),
                 notes=self._optional(values["notes"]),
                 created_at=existing_record.created_at if existing_record else timestamp,
