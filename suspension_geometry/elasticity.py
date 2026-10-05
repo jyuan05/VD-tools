@@ -199,19 +199,59 @@ def _bar_component_law(
     return float(energy - reference_energy), torque, tangent
 
 
-def _invalid_energy(reason: str, jounce: np.ndarray) -> dict[str, Any]:
-    nan4 = np.full(4, np.nan, dtype=float)
+def _component_energy_defaults(setup: Mapping[str, Any]) -> dict[str, Any]:
+    corners = setup.get("corners", {})
+    stop_active = np.array(
+        ["bump_stop" in corners.get(name, {}) for name in CORNER_ORDER],
+        dtype=bool,
+    )
+    active_bars = {
+        axle: _active_bar(setup.get("arbs", {}).get(axle))
+        for axle in ("front", "rear")
+    }
+    component_energies = {
+        "spring": np.full(4, np.nan, dtype=float),
+        "bump_stop": np.where(stop_active, np.nan, 0.0),
+        "arb_front": float("nan") if active_bars["front"] else 0.0,
+        "arb_rear": float("nan") if active_bars["rear"] else 0.0,
+    }
+    component_energy_validity = {
+        "spring": np.zeros(4, dtype=bool),
+        "bump_stop": ~stop_active,
+        "arb_front": not active_bars["front"],
+        "arb_rear": not active_bars["rear"],
+    }
+    component_energy_reason = {
+        "spring": np.full(4, "not_evaluated", dtype=object),
+        "bump_stop": np.where(stop_active, "not_evaluated", "inactive").astype(object),
+        "arb_front": "not_evaluated" if active_bars["front"] else "inactive",
+        "arb_rear": "not_evaluated" if active_bars["rear"] else "inactive",
+    }
+    return {
+        "stop_active": stop_active,
+        "active_bars": active_bars,
+        "component_energies": component_energies,
+        "component_energy_validity": component_energy_validity,
+        "component_energy_reason": component_energy_reason,
+    }
+
+
+def _invalid_energy(reason: str, jounce: np.ndarray, setup: Mapping[str, Any]) -> dict[str, Any]:
+    defaults = _component_energy_defaults(setup)
+    component_energy_reason = defaults["component_energy_reason"]
+    component_energy_reason["spring"][:] = reason
+    component_energy_reason["bump_stop"][defaults["stop_active"]] = reason
+    for axle, active in defaults["active_bars"].items():
+        if active:
+            component_energy_reason[f"arb_{axle}"] = reason
     return {
         "valid": False,
         "reason": reason,
         "energy": float("nan"),
-        "component_energies": {
-            "spring": nan4.copy(),
-            "bump_stop": nan4.copy(),
-            "arb_front": float("nan"),
-            "arb_rear": float("nan"),
-        },
-        "spring_compression": nan4.copy(),
+        "component_energies": defaults["component_energies"],
+        "component_energy_validity": defaults["component_energy_validity"],
+        "component_energy_reason": component_energy_reason,
+        "spring_compression": np.full(4, np.nan, dtype=float),
         "corner_states": {},
         "actuation": {},
         "arb_state": {},
@@ -235,16 +275,25 @@ def wheel_energy(
     if jounce.shape != (4,):
         raise ValueError("jounce_vector must have shape [4] in FL, FR, RL, RR order")
     if not np.all(np.isfinite(jounce)):
-        return _invalid_energy("nonfinite_jounce", jounce)
+        return _invalid_energy("nonfinite_jounce", jounce, setup)
 
+    defaults = _component_energy_defaults(setup)
     states: dict[str, Any] = {}
     actuation: dict[str, Any] = {}
     corner_valid = np.zeros(4, dtype=bool)
     corner_reason: dict[str, str] = {}
     component_reason: dict[str, str] = {}
     spring_compression = np.full(4, np.nan, dtype=float)
-    spring_energy = np.full(4, np.nan, dtype=float)
-    stop_energy = np.zeros(4, dtype=float)
+    spring_energy = defaults["component_energies"]["spring"].copy()
+    stop_energy = defaults["component_energies"]["bump_stop"].copy()
+    component_energy_validity = {
+        key: value.copy() if isinstance(value, np.ndarray) else value
+        for key, value in defaults["component_energy_validity"].items()
+    }
+    component_energy_reason = {
+        key: value.copy() if isinstance(value, np.ndarray) else value
+        for key, value in defaults["component_energy_reason"].items()
+    }
 
     for index, name in enumerate(CORNER_ORDER):
         corner = geometry["corners"][name]
@@ -252,50 +301,94 @@ def wheel_energy(
         states[name] = state
         if not state.valid:
             corner_reason[name] = state.reason
+            component_energy_reason["spring"][index] = state.reason
+            if defaults["stop_active"][index]:
+                component_energy_reason["bump_stop"][index] = state.reason
             continue
         motion = actuation_state(corner, state)
         actuation[name] = motion
         if not motion["valid"]:
             corner_reason[name] = motion["reason"]
+            component_energy_reason["spring"][index] = motion["reason"]
+            if defaults["stop_active"][index]:
+                component_energy_reason["bump_stop"][index] = motion["reason"]
             continue
         spring_compression[index] = float(motion["spring_compression"])
         try:
             spring_energy[index], _, _ = component_law(
                 setup["corners"][name]["spring"], spring_compression[index]
             )
-            if "bump_stop" in setup["corners"][name]:
-                stop_energy[index], _, _ = component_law(
-                    setup["corners"][name]["bump_stop"], spring_compression[index]
-                )
         except ValueError as error:
             component_reason[name] = "curve_domain" if isinstance(error, LawDomainError) else "invalid_law"
             corner_reason[name] = str(error)
+            component_energy_reason["spring"][index] = component_reason[name]
+            if defaults["stop_active"][index]:
+                component_energy_reason["bump_stop"][index] = component_reason[name]
             continue
+        component_energy_validity["spring"][index] = True
+        component_energy_reason["spring"][index] = "ok"
+        if defaults["stop_active"][index]:
+            try:
+                stop_energy[index], _, _ = component_law(
+                    setup["corners"][name]["bump_stop"], spring_compression[index]
+                )
+            except ValueError as error:
+                component_reason[name] = "curve_domain" if isinstance(error, LawDomainError) else "invalid_law"
+                corner_reason[name] = str(error)
+                component_energy_reason["bump_stop"][index] = component_reason[name]
+                continue
+            component_energy_validity["bump_stop"][index] = True
+            component_energy_reason["bump_stop"][index] = "ok"
         corner_valid[index] = True
         corner_reason[name] = "ok"
 
     bars: dict[str, Any] = {}
-    total_bar_energy: dict[str, float] = {"front": 0.0, "rear": 0.0}
+    total_bar_energy: dict[str, float] = {
+        axle: defaults["component_energies"][f"arb_{axle}"] for axle in ("front", "rear")
+    }
+    active_bar_validity = {
+        axle: bool(defaults["component_energy_validity"][f"arb_{axle}"])
+        for axle in ("front", "rear")
+    }
+    active_bar_reason = {
+        axle: str(defaults["component_energy_reason"][f"arb_{axle}"])
+        for axle in ("front", "rear")
+    }
     active_axles = [
         axle for axle in ("front", "rear") if _active_bar(setup.get("arbs", {}).get(axle))
     ]
-    if active_axles and all(corner_valid):
-        bars = arb_angles(geometry, states)
+    if active_axles:
+        if all(corner_valid):
+            bars = arb_angles(geometry, states)
         for axle in active_axles:
+            if not all(corner_valid):
+                active_bar_reason[axle] = "corner_invalid"
+                component_reason[f"arb_{axle}"] = "corner_invalid"
+                continue
             spec = setup["arbs"][axle]
             if axle not in geometry.get("arbs", {}):
+                active_bar_reason[axle] = "arb_geometry_missing"
                 component_reason[f"arb_{axle}"] = "arb_geometry_missing"
                 continue
             bar = bars.get(axle, {})
             if not bar.get("valid", False):
-                component_reason[f"arb_{axle}"] = str(bar.get("reason", "invalid_arb"))
+                active_bar_reason[axle] = str(bar.get("reason", "invalid_arb"))
+                component_reason[f"arb_{axle}"] = active_bar_reason[axle]
                 continue
             try:
                 total_bar_energy[axle] = _bar_component_law(spec, float(bar["twist"]))[0]
             except ValueError as error:
-                component_reason[f"arb_{axle}"] = "curve_domain" if isinstance(error, LawDomainError) else "invalid_law"
+                active_bar_reason[axle] = "curve_domain" if isinstance(error, LawDomainError) else "invalid_law"
+                component_reason[f"arb_{axle}"] = active_bar_reason[axle]
+                continue
+            active_bar_validity[axle] = True
+            active_bar_reason[axle] = "ok"
 
-    valid = bool(corner_valid.all() and not component_reason)
+    for axle in ("front", "rear"):
+        component_energy_validity[f"arb_{axle}"] = active_bar_validity[axle]
+        component_energy_reason[f"arb_{axle}"] = active_bar_reason[axle]
+
+    valid = bool(corner_valid.all() and all(active_bar_validity.values()))
     component_energies: dict[str, Any] = {
         "spring": spring_energy,
         "bump_stop": stop_energy,
@@ -312,6 +405,8 @@ def wheel_energy(
         "reason": "ok" if valid else "invalid_component",
         "energy": total_energy,
         "component_energies": component_energies,
+        "component_energy_validity": component_energy_validity,
+        "component_energy_reason": component_energy_reason,
         "spring_compression": spring_compression,
         "corner_states": states,
         "actuation": actuation,
@@ -425,8 +520,158 @@ def _empty_contributions() -> dict[str, Any]:
     return values
 
 
+def _invalid_contributions(energy: Mapping[str, Any]) -> dict[str, Any]:
+    values = _empty_contributions()
+    values["spring_energy"] = np.asarray(energy["component_energies"]["spring"], dtype=float).copy()
+    values["bump_stop_energy"] = np.asarray(energy["component_energies"]["bump_stop"], dtype=float).copy()
+    values["arb_front_energy"] = float(energy["component_energies"]["arb_front"])
+    values["arb_rear_energy"] = float(energy["component_energies"]["arb_rear"])
+
+    for key, value in values.items():
+        if key.endswith("_energy"):
+            continue
+        if isinstance(value, np.ndarray):
+            value.fill(np.nan)
+        else:
+            values[key] = float("nan")
+
+    stop_inactive = np.asarray(energy["component_energy_reason"]["bump_stop"], dtype=object) == "inactive"
+    for field in ("component_force", "force", "material_rate", "geometric_rate"):
+        values[f"bump_stop_{field}"][stop_inactive] = 0.0
+    values["bump_stop_stiffness"][stop_inactive, :] = 0.0
+    values["bump_stop_stiffness"][:, stop_inactive] = 0.0
+
+    for axle in ("front", "rear"):
+        component = f"arb_{axle}"
+        if energy["component_energy_reason"][component] == "inactive":
+            values[f"{component}_torque"] = 0.0
+            values[f"{component}_force"].fill(0.0)
+            values[f"{component}_stiffness"].fill(0.0)
+            continue
+        indices = (0, 1) if axle == "front" else (2, 3)
+        outside = [index for index in range(4) if index not in indices]
+        values[f"{component}_force"][outside] = 0.0
+        values[f"{component}_stiffness"][outside, :] = 0.0
+        values[f"{component}_stiffness"][:, outside] = 0.0
+    return values
+
+
+def _component_contribution_status(
+    contributions: Mapping[str, Any],
+    energy_validity: Mapping[str, Any],
+    energy_reason: Mapping[str, Any],
+    *,
+    invalid_reason: str = "invalid_contribution",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    validity: dict[str, Any] = {}
+    reasons: dict[str, Any] = {}
+
+    def finite_status(value: Any) -> tuple[Any, Any]:
+        array = np.asarray(value)
+        finite = np.isfinite(array)
+        reason = np.full(array.shape, invalid_reason, dtype=object)
+        reason[finite] = "ok"
+        if array.ndim == 0:
+            return bool(finite), str(reason.item())
+        return finite.astype(bool), reason
+
+    for component in ("spring", "bump_stop"):
+        component_validity: dict[str, Any] = {}
+        component_reasons: dict[str, Any] = {}
+        energy_mask = energy_validity[component]
+        energy_reason_values = energy_reason[component]
+        component_validity["energy"] = (
+            energy_mask.copy() if isinstance(energy_mask, np.ndarray) else bool(energy_mask)
+        )
+        component_reasons["energy"] = (
+            energy_reason_values.copy()
+            if isinstance(energy_reason_values, np.ndarray)
+            else str(energy_reason_values)
+        )
+        inactive = (
+            np.asarray(energy_reason_values, dtype=object) == "inactive"
+            if component == "bump_stop"
+            else np.zeros(4, dtype=bool)
+        )
+        for field in ("component_force", "force", "material_rate", "geometric_rate", "stiffness"):
+            field_valid, field_reason = finite_status(contributions[f"{component}_{field}"])
+            if field == "stiffness":
+                field_valid[inactive, :] = True
+                field_valid[:, inactive] = True
+                field_reason[inactive, :] = "inactive"
+                field_reason[:, inactive] = "inactive"
+            else:
+                field_valid[inactive] = True
+                field_reason[inactive] = "inactive"
+            component_validity[field] = field_valid
+            component_reasons[field] = field_reason
+        validity[component] = component_validity
+        reasons[component] = component_reasons
+
+    for axle in ("front", "rear"):
+        component = f"arb_{axle}"
+        component_validity = {}
+        component_reasons = {}
+        energy_mask = energy_validity[component]
+        energy_reason_value = str(energy_reason[component])
+        component_validity["energy"] = bool(energy_mask)
+        component_reasons["energy"] = energy_reason_value
+        torque_valid, torque_reason = finite_status(contributions[f"{component}_torque"])
+        component_validity["torque"] = torque_valid
+        component_reasons["torque"] = torque_reason
+        indices = (0, 1) if axle == "front" else (2, 3)
+        outside = [index for index in range(4) if index not in indices]
+        force_valid, force_reason = finite_status(contributions[f"{component}_force"])
+        force_valid[outside] = True
+        force_reason[outside] = "inactive"
+        stiffness_valid, stiffness_reason = finite_status(contributions[f"{component}_stiffness"])
+        stiffness_valid[outside, :] = True
+        stiffness_valid[:, outside] = True
+        stiffness_reason[outside, :] = "inactive"
+        stiffness_reason[:, outside] = "inactive"
+        component_validity["force"] = force_valid
+        component_validity["stiffness"] = stiffness_valid
+        component_reasons["force"] = force_reason
+        component_reasons["stiffness"] = stiffness_reason
+        validity[component] = component_validity
+        reasons[component] = component_reasons
+    return validity, reasons
+
+
+def _invalid_component_validity(energy: Mapping[str, Any]) -> dict[str, Any]:
+    validity: dict[str, Any] = {
+        "spring": np.zeros(4, dtype=bool),
+        "bump_stop": np.asarray(energy["component_energy_reason"]["bump_stop"], dtype=object) == "inactive",
+    }
+    for axle in ("front", "rear"):
+        component = f"arb_{axle}"
+        matrix_valid = np.ones((4, 4), dtype=bool)
+        matrix_reason = np.full((4, 4), "response_invalid", dtype=object)
+        if energy["component_energy_reason"][component] == "inactive":
+            matrix_reason[:, :] = "inactive"
+        else:
+            indices = (0, 1) if axle == "front" else (2, 3)
+            outside = [index for index in range(4) if index not in indices]
+            matrix_valid[np.ix_(indices, indices)] = False
+            matrix_reason[np.ix_(indices, indices)] = "response_invalid"
+            matrix_reason[outside, :] = "inactive"
+            matrix_reason[:, outside] = "inactive"
+        validity[component] = {
+            "stiffness_valid": matrix_valid,
+            "stiffness_reason": matrix_reason,
+        }
+    return validity
+
+
 def _invalid_response(energy: dict[str, Any], steps: np.ndarray) -> dict[str, Any]:
     reason = str(energy["reason"])
+    contributions = _invalid_contributions(energy)
+    contribution_validity, contribution_reason = _component_contribution_status(
+        contributions,
+        energy["component_energy_validity"],
+        energy["component_energy_reason"],
+        invalid_reason="response_invalid",
+    )
     return {
         "valid": False,
         "reason": reason,
@@ -443,9 +688,13 @@ def _invalid_response(energy: dict[str, Any], steps: np.ndarray) -> dict[str, An
         "motion_ratios": np.full(4, np.nan),
         "motion_ratio_valid": np.zeros(4, dtype=bool),
         "motion_ratio_reason": np.full(4, reason, dtype=object),
-        "component_contributions": _empty_contributions(),
+        "component_contributions": contributions,
         "component_energies": energy["component_energies"],
-        "component_validity": {},
+        "component_energy_validity": energy["component_energy_validity"],
+        "component_energy_reason": energy["component_energy_reason"],
+        "component_contribution_validity": contribution_validity,
+        "component_contribution_reason": contribution_reason,
+        "component_validity": _invalid_component_validity(energy),
         "derivative_steps": steps.copy(),
         "derivative_quality": {},
         "corner_states": energy["corner_states"],
@@ -656,6 +905,11 @@ def wheel_response(
     motion_ratio_valid = np.isfinite(motion_ratios)
     motion_ratio_reason = np.where(motion_ratio_valid, "ok", gradient_reason).astype(object)
     valid = bool(energy_result["valid"] and gradient_valid.all())
+    contribution_validity, contribution_reason = _component_contribution_status(
+        contributions,
+        energy_result["component_energy_validity"],
+        energy_result["component_energy_reason"],
+    )
     return {
         "valid": valid,
         "reason": "ok" if valid else "invalid_gradient",
@@ -674,6 +928,10 @@ def wheel_response(
         "motion_ratio_reason": motion_ratio_reason,
         "component_contributions": contributions,
         "component_energies": energy_result["component_energies"],
+        "component_energy_validity": energy_result["component_energy_validity"],
+        "component_energy_reason": energy_result["component_energy_reason"],
+        "component_contribution_validity": contribution_validity,
+        "component_contribution_reason": contribution_reason,
         "component_validity": component_validity,
         "derivative_steps": steps.copy(),
         "derivative_quality": quality,

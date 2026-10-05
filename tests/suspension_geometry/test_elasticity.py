@@ -203,3 +203,96 @@ def test_wheel_response_matches_an_independent_energy_difference():
 
     assert response["gradient"][0] == pytest.approx(independent_force, rel=2e-4, abs=0.05)
     assert response["stiffness"][0, 0] == pytest.approx(independent_tangent, rel=1e-2, abs=10.0)
+
+
+def test_active_arb_missing_geometry_is_nan_with_component_masks():
+    geometry = copy.deepcopy(load_geometry(DIRECT_GEOMETRY))
+    geometry["arbs"].pop("front")
+    setup = _setup(arb_rate=900.0)
+    wheel_energy = _api("wheel_energy")
+    wheel_response = _api("wheel_response")
+
+    energy = wheel_energy(geometry, setup, np.zeros(4))
+    assert not energy["valid"]
+    assert np.isfinite(energy["component_energies"]["spring"]).all()
+    assert np.isnan(energy["component_energies"]["arb_front"])
+    assert not energy["component_energy_validity"]["arb_front"]
+    assert energy["component_energy_reason"]["arb_front"] == "arb_geometry_missing"
+
+    response = wheel_response(geometry, setup, np.zeros(4))
+    assert not response["valid"]
+    assert np.isnan(response["component_contributions"]["arb_front_energy"])
+    assert not response["component_contribution_validity"]["arb_front"]["energy"]
+    np.testing.assert_array_equal(
+        np.isnan(response["component_contributions"]["arb_front_force"]),
+        [True, True, False, False],
+    )
+    assert not response["component_contribution_validity"]["arb_front"]["force"][:2].any()
+    assert response["component_contribution_validity"]["arb_front"]["force"][2:].all()
+
+
+def test_configured_bump_stop_law_failure_preserves_known_energy_and_masks_stop():
+    geometry = load_geometry(DIRECT_GEOMETRY)
+    setup = _setup(
+        stop={"engagement": -0.1, "curve": [[0.0, 0.0], [0.01, 10.0]]},
+        stop_corners=("FL",),
+    )
+    wheel_energy = _api("wheel_energy")
+    wheel_response = _api("wheel_response")
+
+    energy = wheel_energy(geometry, setup, np.zeros(4))
+    assert not energy["valid"]
+    assert np.isfinite(energy["component_energies"]["spring"]).all()
+    assert np.isnan(energy["component_energies"]["bump_stop"][0])
+    np.testing.assert_array_equal(energy["component_energies"]["bump_stop"][1:], 0.0)
+    np.testing.assert_array_equal(
+        energy["component_energy_validity"]["bump_stop"], [False, True, True, True]
+    )
+    assert energy["component_energy_reason"]["bump_stop"][0] == "curve_domain"
+    assert np.all(energy["component_energy_reason"]["bump_stop"][1:] == "inactive")
+
+    response = wheel_response(geometry, setup, np.zeros(4))
+    assert not response["valid"]
+    assert np.isfinite(response["component_contributions"]["spring_energy"]).all()
+    assert np.isnan(response["component_contributions"]["bump_stop_energy"][0])
+    np.testing.assert_array_equal(response["component_contributions"]["bump_stop_force"][1:], 0.0)
+    assert np.isnan(response["component_contributions"]["bump_stop_force"][0])
+    assert not response["component_contribution_validity"]["bump_stop"]["force"][0]
+    assert response["component_contribution_validity"]["bump_stop"]["force"][1:].all()
+
+
+def test_corner_solve_failure_masks_configured_stop_without_erasing_other_corners():
+    geometry = load_geometry(DIRECT_GEOMETRY)
+    setup = _setup(stop={"engagement": 0.02, "rate": 40000.0}, stop_corners=("FL",))
+    wheel_energy = _api("wheel_energy")
+
+    energy = wheel_energy(geometry, setup, np.array([5.0, 0.0, 0.0, 0.0]))
+    assert not energy["valid"]
+    assert not energy["corner_valid"][0]
+    assert np.isnan(energy["component_energies"]["spring"][0])
+    assert np.isnan(energy["component_energies"]["bump_stop"][0])
+    assert np.isfinite(energy["component_energies"]["spring"][1:]).all()
+    np.testing.assert_array_equal(energy["component_energies"]["bump_stop"][1:], 0.0)
+    assert not energy["component_energy_validity"]["spring"][0]
+    assert not energy["component_energy_validity"]["bump_stop"][0]
+
+
+def test_omitted_inactive_arbs_remain_valid_zero_with_masks():
+    geometry = load_geometry(DIRECT_GEOMETRY)
+    setup = _setup(arb_rate=0.0)
+    wheel_energy = _api("wheel_energy")
+    wheel_response = _api("wheel_response")
+
+    energy = wheel_energy(geometry, setup, np.zeros(4))
+    assert energy["valid"]
+    assert energy["component_energies"]["arb_front"] == pytest.approx(0.0)
+    assert energy["component_energies"]["arb_rear"] == pytest.approx(0.0)
+    assert energy["component_energy_validity"]["arb_front"]
+    assert energy["component_energy_reason"]["arb_front"] == "inactive"
+
+    response = wheel_response(geometry, setup, np.zeros(4))
+    assert response["valid"]
+    assert response["component_contributions"]["arb_front_energy"] == pytest.approx(0.0)
+    assert response["component_contributions"]["arb_front_torque"] == pytest.approx(0.0)
+    assert response["component_contribution_validity"]["arb_front"]["energy"]
+    assert response["component_contribution_validity"]["arb_front"]["force"].all()
