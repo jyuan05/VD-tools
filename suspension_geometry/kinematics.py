@@ -101,16 +101,19 @@ def _constraints(solution: np.ndarray, corner: dict, jounce: float) -> np.ndarra
 
 
 def _condition_number(jacobian: np.ndarray, corner: dict) -> float:
-    # Normalize angular columns to an equivalent linear displacement using
-    # the corner's upright-to-wheel-centre lever arm.
+    # Use d = L * angle as the scaled rotation coordinate.  Differentiating
+    # against d divides each radians column by the characteristic length.
     center = np.asarray(corner["wheel_center"], dtype=float)
     lever_arms = [
         np.linalg.norm(np.asarray(corner[name][f"{name}_ball_joint"], dtype=float) - center)
         for name in ("lower", "upper")
     ]
-    characteristic_length = max(float(np.mean(lever_arms)), 0.1)
-    scale = np.diag([1.0, 1.0, 1.0, characteristic_length, characteristic_length, characteristic_length])
-    singular_values = np.linalg.svd(np.asarray(jacobian, dtype=float) @ scale, compute_uv=False)
+    characteristic_length = float(np.mean(lever_arms))
+    if not np.isfinite(characteristic_length) or characteristic_length <= np.finfo(float).tiny:
+        return float("inf")
+    scaled_jacobian = np.asarray(jacobian, dtype=float).copy()
+    scaled_jacobian[:, 3:] /= characteristic_length
+    singular_values = np.linalg.svd(scaled_jacobian, compute_uv=False)
     if not singular_values.size or singular_values[-1] <= np.finfo(float).eps * singular_values[0]:
         return float("inf")
     return float(singular_values[0] / singular_values[-1])

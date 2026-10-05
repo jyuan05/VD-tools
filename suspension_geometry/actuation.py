@@ -38,11 +38,16 @@ def _rotating_link_solution(
     axis: np.ndarray,
     rotating_point: np.ndarray,
     target: np.ndarray,
-    reference_length: float,
+    reference_target: np.ndarray,
     angle_limits: list[float] | tuple[float, float],
-    preferred_angle: float = 0.0,
 ) -> tuple[float, float, str]:
-    """Solve the exact circle/sphere closure for one rotating link endpoint."""
+    """Solve closure on the assembly branch defined by the nominal geometry.
+
+    The signed distance slope at the reference angle labels its assembly
+    branch.  Each scalar evaluation uses that same label, so finite-difference
+    call order cannot select a different root.  A reference/current toggle is
+    invalid; an out-of-limit reference root never falls back to its alternate.
+    """
     axis = np.asarray(axis, dtype=float)
     axis_length = float(np.linalg.norm(axis))
     if not np.isfinite(axis_length) or axis_length <= _EPS:
@@ -51,10 +56,25 @@ def _rotating_link_solution(
     pivot = np.asarray(pivot, dtype=float)
     rotating_point = np.asarray(rotating_point, dtype=float)
     target = np.asarray(target, dtype=float)
+    reference_target = np.asarray(reference_target, dtype=float)
+    reference_length = float(np.linalg.norm(rotating_point - reference_target))
+    if not np.isfinite(reference_length) or reference_length <= _EPS:
+        return float("nan"), float("nan"), "link_closure"
+
     radius = rotating_point - pivot
     parallel = axis * np.dot(axis, radius)
     radial = radius - parallel
     tangent = np.cross(axis, radial)
+    reference_slope = float(np.dot(rotating_point - reference_target, tangent))
+    reference_slope_scale = reference_length * float(np.linalg.norm(tangent))
+    if reference_slope_scale <= _EPS or abs(reference_slope) <= 1e-7 * reference_slope_scale:
+        return float("nan"), float("nan"), "link_toggle"
+    reference_orientation = 1.0 if reference_slope > 0.0 else -1.0
+
+    low, high = map(float, angle_limits)
+    if low > _ANGLE_TOL or high < -_ANGLE_TOL:
+        return float("nan"), float("nan"), "angle_limit"
+
     other = pivot - target + parallel
 
     constant = float(np.dot(other, other) + np.dot(radial, radial))
@@ -65,7 +85,7 @@ def _rotating_link_solution(
     if amplitude <= _EPS:
         if abs(target_value) > 1e-10 * max(reference_length * reference_length, 1.0):
             return float("nan"), float("nan"), "link_closure"
-        roots = [float(preferred_angle)]
+        return float("nan"), float("nan"), "link_toggle"
     else:
         ratio = target_value / amplitude
         if ratio < -1.0 - 1e-10 or ratio > 1.0 + 1e-10:
@@ -74,30 +94,40 @@ def _rotating_link_solution(
         phase = float(np.arctan2(sine, cosine))
         offset = float(np.arccos(ratio))
         roots: list[float] = []
-        low, high = map(float, angle_limits)
         for base in (phase - offset, phase + offset):
-            for turns in range(-2, 3):
+            for turns in range(-1, 2):
                 candidate = base + turns * 2.0 * np.pi
-                if low - _ANGLE_TOL <= candidate <= high + _ANGLE_TOL:
-                    candidate = float(np.clip(candidate, low, high))
+                if -np.pi - _ANGLE_TOL <= candidate <= np.pi + _ANGLE_TOL:
+                    candidate = float(np.clip(candidate, -np.pi, np.pi))
                     if not any(abs(candidate - prior) <= 1e-9 for prior in roots):
                         roots.append(candidate)
         if not roots:
-            return float("nan"), float("nan"), "angle_limit"
+            return float("nan"), float("nan"), "link_closure"
 
-    angle = min(roots, key=lambda value: (abs(value - preferred_angle), abs(value)))
-    moved = _rotate_point(rotating_point, pivot, axis, angle)
-    delta = moved - target
-    residual = float(np.linalg.norm(delta) - reference_length)
-    if not np.isfinite(residual) or abs(residual) > 2e-9:
-        return float("nan"), residual, "link_closure"
+    matching_branch: list[tuple[float, float]] = []
+    toggle_root = False
+    for candidate in roots:
+        moved = _rotate_point(rotating_point, pivot, axis, candidate)
+        delta = moved - target
+        residual = float(np.linalg.norm(delta) - reference_length)
+        tangent_at_root = np.cross(axis, moved - pivot)
+        slope = float(np.dot(delta, tangent_at_root))
+        slope_scale = float(np.linalg.norm(delta) * np.linalg.norm(tangent_at_root))
+        if not np.isfinite(residual) or abs(residual) > 2e-9:
+            continue
+        if slope_scale <= _EPS or abs(slope) <= 1e-7 * slope_scale:
+            toggle_root = True
+            continue
+        if (1.0 if slope > 0.0 else -1.0) == reference_orientation:
+            matching_branch.append((candidate, residual))
 
-    radial_length = float(np.linalg.norm(radial))
-    derivative = abs(float(np.dot(delta, np.cross(axis, moved - pivot))))
-    if radial_length > _EPS and reference_length > _EPS:
-        normalized_slope = derivative / (reference_length * radial_length)
-        if normalized_slope <= 1e-7:
-            return float("nan"), residual, "link_toggle"
+    if not matching_branch:
+        reason = "link_toggle" if toggle_root else "discontinuous_branch"
+        return float("nan"), float("nan"), reason
+
+    angle, residual = min(matching_branch, key=lambda item: abs(item[0]))
+    if angle < low - _ANGLE_TOL or angle > high + _ANGLE_TOL:
+        return float("nan"), residual, "angle_limit"
     return angle, residual, "ok"
 
 
@@ -110,13 +140,12 @@ def _rocker_solution(corner: dict, state: CornerState) -> tuple[float, float, st
         return float("nan"), float("nan"), "attachment_invalid"
     rod_point = np.asarray(rocker["rod_point"], dtype=float)
     mount_reference = np.asarray(rocker["rod_mount"]["point"], dtype=float)
-    rod_length = float(np.linalg.norm(rod_point - mount_reference))
     return _rotating_link_solution(
         pivot=np.asarray(rocker["pivot"], dtype=float),
         axis=np.asarray(rocker["axis"], dtype=float),
         rotating_point=rod_point,
         target=target,
-        reference_length=rod_length,
+        reference_target=mount_reference,
         angle_limits=rocker["angle_limits"],
     )
 
@@ -281,13 +310,12 @@ def _arb_side(
         return float("nan"), "attachment_invalid"
     tip = np.asarray(lever["tip"], dtype=float)
     pickup_reference = np.asarray(lever["pickup"]["point"], dtype=float)
-    reference_length = float(np.linalg.norm(tip - pickup_reference))
     raw_angle, _, reason = _rotating_link_solution(
         pivot=np.asarray(lever["pivot"], dtype=float),
         axis=axis,
         rotating_point=tip,
         target=pickup,
-        reference_length=reference_length,
+        reference_target=pickup_reference,
         angle_limits=lever["angle_limits"],
     )
     if reason != "ok":

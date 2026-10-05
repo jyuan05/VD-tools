@@ -277,3 +277,39 @@ def test_arb_rejects_lever_axis_outside_shared_shaft_line():
     assert not result["valid"]
     assert result["reason"] == "bar_axis_invalid"
     assert np.isnan(result["twist"])
+
+
+def test_two_root_closure_stays_on_the_physically_defined_reference_assembly():
+    solve_link = _api(actuation, "actuation", "_rotating_link_solution")
+    pivot = np.asarray([0.0, 0.0, 0.0])
+    axis = np.asarray([0.0, 0.0, 1.0])
+    rotating_point = np.asarray([1.0, 0.0, 0.0])
+    nominal_target = np.asarray([-2.0, 0.25, 0.0])
+    endpoint_target = np.asarray([-2.5, -1.5, 0.0])
+    targets = [nominal_target + (endpoint_target - nominal_target) * fraction for fraction in np.linspace(0.0, 1.0, 21)]
+
+    def solve(target):
+        return solve_link(
+            pivot=pivot,
+            axis=axis,
+            rotating_point=rotating_point,
+            target=target,
+            reference_target=nominal_target,
+            angle_limits=[-np.pi, np.pi],
+        )
+
+    forward = [solve(target) for target in targets]
+    reverse = [solve(target) for target in targets[::-1]]
+    nominal_tangent = np.cross(axis, rotating_point - pivot)
+    reference_slope = np.dot(rotating_point - nominal_target, nominal_tangent)
+    for target, (angle, residual, reason) in zip(targets, forward, strict=True):
+        assert reason == "ok"
+        assert abs(residual) <= 2e-9
+        moved = _rotate_about(rotating_point, pivot, axis, angle)
+        tangent = np.cross(axis, moved - pivot)
+        slope = np.dot(moved - target, tangent)
+        assert slope * reference_slope > 0.0
+    assert abs(forward[0][0]) <= 2e-8
+    assert np.max(np.abs(np.diff([item[0] for item in forward]))) < 0.2
+    for first, second in zip(forward, reverse[::-1], strict=True):
+        assert first[0] == pytest.approx(second[0], abs=1e-10)

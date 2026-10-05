@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
 from pathlib import Path
 
@@ -31,6 +32,25 @@ def _api(name: str):
 
 def _geometry() -> dict:
     return load_geometry(DIRECT_GEOMETRY)
+
+
+def _scale_corner(corner: dict, scale: float) -> dict:
+    result = copy.deepcopy(corner)
+    for field in ("wheel_center",):
+        result[field] = (np.asarray(result[field], dtype=float) * scale).tolist()
+    result["radius"] *= scale
+    result["jounce_limits"] = (np.asarray(result["jounce_limits"], dtype=float) * scale).tolist()
+    for arm_name in ("lower", "upper"):
+        for field in ("inboard_rearward", "inboard_forward", f"{arm_name}_ball_joint"):
+            result[arm_name][field] = (np.asarray(result[arm_name][field], dtype=float) * scale).tolist()
+    for field in ("inboard", "outboard"):
+        result["tie"][field] = (np.asarray(result["tie"][field], dtype=float) * scale).tolist()
+    for component_name in ("spring", "damper"):
+        component = result[component_name]
+        component["fixed"] = (np.asarray(component["fixed"], dtype=float) * scale).tolist()
+        component["moving"]["point"] = (np.asarray(component["moving"]["point"], dtype=float) * scale).tolist()
+        component["length_limits"] = (np.asarray(component["length_limits"], dtype=float) * scale).tolist()
+    return result
 
 
 def _point_map(corner: dict, state) -> dict[str, np.ndarray]:
@@ -71,6 +91,18 @@ def test_zero_pose_is_exact_reference_and_closes_every_link():
     assert state.residual <= 1e-9
     assert np.isfinite(state.condition) and state.condition < 1e10
     _assert_nominal_link_lengths(corner, state)
+
+
+def test_constraint_condition_is_invariant_to_uniform_geometry_scale():
+    solve_corner = _api("solve_corner")
+    base_corner = _geometry()["corners"]["FL"]
+
+    states = [solve_corner(_scale_corner(base_corner, scale), 0.0) for scale in (0.01, 1.0, 100.0)]
+
+    assert all(state.valid for state in states)
+    conditions = np.asarray([state.condition for state in states])
+    assert np.all(np.isfinite(conditions))
+    assert np.max(conditions) / np.min(conditions) < 1.01
 
 
 @pytest.mark.parametrize("jounce", [-0.06, -0.03, 0.03, 0.06])
