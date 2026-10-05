@@ -48,8 +48,8 @@ def _rotate_about(point: np.ndarray, origin: np.ndarray, axis: np.ndarray, angle
 
 
 def _arm_angle(arm: dict, actual_outboard: np.ndarray) -> float:
-    first = np.asarray(arm["inboard_a"], dtype=float)
-    axis = np.asarray(arm["inboard_b"], dtype=float) - first
+    first = np.asarray(arm["inboard_rearward"], dtype=float)
+    axis = np.asarray(arm["inboard_forward"], dtype=float) - first
     axis /= np.linalg.norm(axis)
     reference = np.asarray(arm["outboard"], dtype=float)
     r0 = reference - first - axis * np.dot(reference - first, axis)
@@ -60,10 +60,10 @@ def _arm_angle(arm: dict, actual_outboard: np.ndarray) -> float:
 def _expected_lower_point(corner: dict, state, point) -> np.ndarray:
     angle = _arm_angle(corner["lower"], np.asarray(state.lower_outboard, dtype=float))
     arm = corner["lower"]
-    axis = np.asarray(arm["inboard_b"], dtype=float) - arm["inboard_a"]
+    axis = np.asarray(arm["inboard_forward"], dtype=float) - arm["inboard_rearward"]
     axis /= np.linalg.norm(axis)
     return _rotate_about(
-        np.asarray(point, dtype=float), np.asarray(arm["inboard_a"], dtype=float), axis, angle
+        np.asarray(point, dtype=float), np.asarray(arm["inboard_rearward"], dtype=float), axis, angle
     )
 
 

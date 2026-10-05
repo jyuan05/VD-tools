@@ -206,19 +206,25 @@ def _component_geometry(
 
 def _wishbone(value: Any, path: str, length_scale: float) -> dict[str, list[float]]:
     arm = _mapping(value, path)
+    for legacy_name in ("inboard_a", "inboard_b"):
+        if legacy_name in arm:
+            raise ConfigError(
+                f"{path}.{legacy_name}: legacy wishbone pivot name; use inboard_forward or "
+                "inboard_rearward according to its chassis x position (x increases forward)"
+            )
     _fields(
         arm,
-        allowed={"inboard_a", "inboard_b", "outboard"},
-        required={"inboard_a", "inboard_b", "outboard"},
+        allowed={"inboard_forward", "inboard_rearward", "outboard"},
+        required={"inboard_forward", "inboard_rearward", "outboard"},
         path=path,
     )
     result = {
         key: _vector(arm[key], f"{path}.{key}", length_scale)
-        for key in ("inboard_a", "inboard_b", "outboard")
+        for key in ("inboard_forward", "inboard_rearward", "outboard")
     }
-    if math.dist(result["inboard_a"], result["inboard_b"]) <= _EPS:
-        raise ConfigError(f"{path}.inboard_a/inboard_b: wishbone pivot axis has zero length")
-    for name in ("inboard_a", "inboard_b"):
+    if math.dist(result["inboard_rearward"], result["inboard_forward"]) <= _EPS:
+        raise ConfigError(f"{path}.inboard_rearward/inboard_forward: wishbone pivot axis has zero length")
+    for name in ("inboard_rearward", "inboard_forward"):
         if math.dist(result[name], result["outboard"]) <= _EPS:
             raise ConfigError(f"{path}.{name}/outboard: wishbone arm has zero length")
     return result
@@ -320,7 +326,7 @@ def _mirror_corner(value: dict[str, Any]) -> dict[str, Any]:
     result["wheel_center"] = _mirror_point(value["wheel_center"])
     result["spindle_axis"] = _mirror_axial(value["spindle_axis"])
     for wishbone in ("lower", "upper"):
-        for point in ("inboard_a", "inboard_b", "outboard"):
+        for point in ("inboard_forward", "inboard_rearward", "outboard"):
             result[wishbone][point] = _mirror_point(value[wishbone][point])
     for point in ("inboard", "outboard"):
         result["tie"][point] = _mirror_point(value["tie"][point])

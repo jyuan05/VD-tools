@@ -47,7 +47,7 @@ def _assert_nominal_link_lengths(corner: dict, state) -> None:
     for name in ("lower", "upper"):
         arm = corner[name]
         point = np.asarray(getattr(state, f"{name}_outboard"), dtype=float)
-        for pivot in ("inboard_a", "inboard_b"):
+        for pivot in ("inboard_rearward", "inboard_forward"):
             expected = np.linalg.norm(np.asarray(arm["outboard"]) - arm[pivot])
             actual = np.linalg.norm(point - np.asarray(arm[pivot]))
             assert actual == pytest.approx(expected, abs=2e-9)

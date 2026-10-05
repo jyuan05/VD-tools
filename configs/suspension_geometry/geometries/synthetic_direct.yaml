@@ -20,11 +20,11 @@ corners:
     - 0.0
     radius: 0.32
     lower:
-      inboard_a:
+      inboard_rearward:
       - 1.08
       - 0.35
       - 0.2
-      inboard_b:
+      inboard_forward:
       - 1.52
       - 0.35
       - 0.2
@@ -33,11 +33,11 @@ corners:
       - 0.75
       - 0.2
     upper:
-      inboard_a:
+      inboard_rearward:
       - 1.1
       - 0.4
       - 0.49
-      inboard_b:
+      inboard_forward:
       - 1.5
       - 0.4
       - 0.49
@@ -83,11 +83,11 @@ corners:
     - 0.0
     radius: 0.32
     lower:
-      inboard_a:
+      inboard_rearward:
       - -1.42
       - 0.35
       - 0.2
-      inboard_b:
+      inboard_forward:
       - -0.98
       - 0.35
       - 0.2
@@ -96,11 +96,11 @@ corners:
       - 0.75
       - 0.2
     upper:
-      inboard_a:
+      inboard_rearward:
       - -1.4
       - 0.4
       - 0.49
-      inboard_b:
+      inboard_forward:
       - -1.0
       - 0.4
       - 0.49

@@ -21,12 +21,12 @@ def _rotate_point(point: np.ndarray, origin: np.ndarray, axis: np.ndarray, angle
 
 def _wishbone_angle(corner: dict, state: CornerState, name: str) -> float:
     arm = corner[name]
-    pivot_a = np.asarray(arm["inboard_a"], dtype=float)
-    pivot_b = np.asarray(arm["inboard_b"], dtype=float)
-    axis = pivot_b - pivot_a
+    pivot_rearward = np.asarray(arm["inboard_rearward"], dtype=float)
+    pivot_forward = np.asarray(arm["inboard_forward"], dtype=float)
+    axis = pivot_forward - pivot_rearward
     axis /= np.linalg.norm(axis)
-    reference = np.asarray(arm["outboard"], dtype=float) - pivot_a
-    actual = np.asarray(getattr(state, f"{name}_outboard"), dtype=float) - pivot_a
+    reference = np.asarray(arm["outboard"], dtype=float) - pivot_rearward
+    actual = np.asarray(getattr(state, f"{name}_outboard"), dtype=float) - pivot_rearward
     reference -= axis * np.dot(reference, axis)
     actual -= axis * np.dot(actual, axis)
     return float(np.arctan2(np.dot(axis, np.cross(reference, actual)), np.dot(reference, actual)))
@@ -137,8 +137,8 @@ def _attachment_position(
         return np.asarray(state.wheel_center, dtype=float) + np.asarray(state.rotation, dtype=float) @ (point - center)
     if body in {"lower", "upper"}:
         arm = corner[body]
-        pivot = np.asarray(arm["inboard_a"], dtype=float)
-        axis = np.asarray(arm["inboard_b"], dtype=float) - pivot
+        pivot = np.asarray(arm["inboard_rearward"], dtype=float)
+        axis = np.asarray(arm["inboard_forward"], dtype=float) - pivot
         axis /= np.linalg.norm(axis)
         angle = _wishbone_angle(corner, state, body)
         return _rotate_point(point, pivot, axis, angle)

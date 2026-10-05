@@ -87,7 +87,7 @@ def _constraints(solution: np.ndarray, corner: dict, jounce: float) -> np.ndarra
         arm = corner[name]
         nominal = np.asarray(arm["outboard"], dtype=float)
         current = points[name]
-        for pivot_name in ("inboard_a", "inboard_b"):
+        for pivot_name in ("inboard_rearward", "inboard_forward"):
             pivot = np.asarray(arm[pivot_name], dtype=float)
             constraints.append(float(np.linalg.norm(current - pivot) - np.linalg.norm(nominal - pivot)))
     tie = corner["tie"]

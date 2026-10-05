@@ -35,13 +35,13 @@ def _corner(x: float, side: float, *, rocker: bool = False) -> dict:
         "spindle_axis": [0.0, 1.0, 0.0],
         "radius": 0.32,
         "lower": {
-            "inboard_a": [x - 0.22, side * 0.35, 0.20],
-            "inboard_b": [x + 0.22, side * 0.35, 0.20],
+            "inboard_rearward": [x - 0.22, side * 0.35, 0.20],
+            "inboard_forward": [x + 0.22, side * 0.35, 0.20],
             "outboard": [x, side * 0.75, 0.20],
         },
         "upper": {
-            "inboard_a": [x - 0.20, side * 0.40, 0.49],
-            "inboard_b": [x + 0.20, side * 0.40, 0.49],
+            "inboard_rearward": [x - 0.20, side * 0.40, 0.49],
+            "inboard_forward": [x + 0.20, side * 0.40, 0.49],
             "outboard": [x, side * 0.75, 0.49],
         },
         "tie": {
@@ -124,7 +124,7 @@ def _scale_geometry_lengths(value: dict, scale: float) -> dict:
         if isinstance(item, list):
             if key in {
                 "reference_origin_world", "wheel_center", "point", "fixed", "pivot", "tip",
-                "rod_point", "inboard_a", "inboard_b", "outboard", "inboard",
+                "rod_point", "inboard_forward", "inboard_rearward", "outboard", "inboard",
             }:
                 return [x * scale for x in item]
             if key in {"jounce_limits", "length_limits"}:
@@ -195,6 +195,12 @@ def test_explicit_four_corners_preserve_asymmetric_geometry(tmp_path):
     assert loaded["corners"]["FR"]["wheel_center"][0] == pytest.approx(1.317)
     assert loaded["corners"]["RR"]["upper"]["outboard"][2] == pytest.approx(0.499)
     assert loaded["corners"]["FL"]["wheel_center"][0] == pytest.approx(1.3)
+    assert loaded["corners"]["RL"]["upper"]["inboard_rearward"] == pytest.approx(
+        [-1.4, 0.4, 0.49]
+    )
+    assert loaded["corners"]["RR"]["upper"]["inboard_forward"] == pytest.approx(
+        [-1.0, -0.4, 0.49]
+    )
 
 
 def test_mirror_reflects_points_and_axial_axes_physically(tmp_path):
@@ -203,16 +209,27 @@ def test_mirror_reflects_points_and_axial_axes_physically(tmp_path):
     right = loaded["corners"]["FR"]
 
     assert right["wheel_center"] == pytest.approx([1.3, -0.75, 0.32])
-    assert right["lower"]["inboard_a"] == pytest.approx([1.08, -0.35, 0.20])
+    assert right["lower"]["inboard_rearward"] == pytest.approx([1.08, -0.35, 0.20])
     assert right["spring"]["moving"]["point"] == pytest.approx([1.6, -0.56, 0.61])
     assert right["rocker"]["axis"] == pytest.approx([-1.0, 0.0, 0.0])
     assert right["spindle_axis"] == pytest.approx([0.0, 1.0, 0.0])
     assert left["rocker"]["axis"] == pytest.approx([1.0, 0.0, 0.0])
 
 
-def test_zero_length_wishbone_pivot_identifies_corner_and_field(tmp_path):
+def test_wishbone_pivot_names_and_zero_length_error_are_actionable(tmp_path):
     raw = _geometry()
-    raw["corners"]["FL"]["lower"]["inboard_b"] = raw["corners"]["FL"]["lower"]["inboard_a"]
+    legacy = copy.deepcopy(raw)
+    for corner in legacy["corners"].values():
+        for name in ("lower", "upper"):
+            arm = corner[name]
+            arm["inboard_a"] = arm.pop("inboard_rearward")
+            arm["inboard_b"] = arm.pop("inboard_forward")
+
+    with pytest.raises(ValueError, match=r"FL\.lower\.inboard_a.*inboard_forward.*inboard_rearward"):
+        _api("load_geometry")(_write_yaml(tmp_path, "legacy-pivots.yaml", legacy))
+
+    raw = _geometry()
+    raw["corners"]["FL"]["lower"]["inboard_forward"] = raw["corners"]["FL"]["lower"]["inboard_rearward"]
 
     with pytest.raises(ValueError, match=r"FL.*lower\.inboard"):
         _api("load_geometry")(_write_yaml(tmp_path, "bad-pivot.yaml", raw))
