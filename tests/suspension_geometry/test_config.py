@@ -37,12 +37,12 @@ def _corner(x: float, side: float, *, rocker: bool = False) -> dict:
         "lower": {
             "inboard_rearward": [x - 0.22, side * 0.35, 0.20],
             "inboard_forward": [x + 0.22, side * 0.35, 0.20],
-            "outboard": [x, side * 0.75, 0.20],
+            "lower_ball_joint": [x, side * 0.75, 0.20],
         },
         "upper": {
             "inboard_rearward": [x - 0.20, side * 0.40, 0.49],
             "inboard_forward": [x + 0.20, side * 0.40, 0.49],
-            "outboard": [x, side * 0.75, 0.49],
+            "upper_ball_joint": [x, side * 0.75, 0.49],
         },
         "tie": {
             "inboard": [x - 0.48, side * 0.35, 0.45],
@@ -124,7 +124,8 @@ def _scale_geometry_lengths(value: dict, scale: float) -> dict:
         if isinstance(item, list):
             if key in {
                 "reference_origin_world", "wheel_center", "point", "fixed", "pivot", "tip",
-                "rod_point", "inboard_forward", "inboard_rearward", "outboard", "inboard",
+                "rod_point", "inboard_forward", "inboard_rearward", "upper_ball_joint",
+                "lower_ball_joint", "outboard", "inboard",
             }:
                 return [x * scale for x in item]
             if key in {"jounce_limits", "length_limits"}:
@@ -189,11 +190,11 @@ def test_geometry_angle_units_convert_degrees_to_radians(tmp_path):
 def test_explicit_four_corners_preserve_asymmetric_geometry(tmp_path):
     raw = _geometry()
     raw["corners"]["FR"]["wheel_center"][0] += 0.017
-    raw["corners"]["RR"]["upper"]["outboard"][2] += 0.009
+    raw["corners"]["RR"]["upper"]["upper_ball_joint"][2] += 0.009
     loaded = _api("load_geometry")(_write_yaml(tmp_path, "asymmetric.yaml", raw))
 
     assert loaded["corners"]["FR"]["wheel_center"][0] == pytest.approx(1.317)
-    assert loaded["corners"]["RR"]["upper"]["outboard"][2] == pytest.approx(0.499)
+    assert loaded["corners"]["RR"]["upper"]["upper_ball_joint"][2] == pytest.approx(0.499)
     assert loaded["corners"]["FL"]["wheel_center"][0] == pytest.approx(1.3)
     assert loaded["corners"]["RL"]["upper"]["inboard_rearward"] == pytest.approx(
         [-1.4, 0.4, 0.49]
@@ -210,6 +211,7 @@ def test_mirror_reflects_points_and_axial_axes_physically(tmp_path):
 
     assert right["wheel_center"] == pytest.approx([1.3, -0.75, 0.32])
     assert right["lower"]["inboard_rearward"] == pytest.approx([1.08, -0.35, 0.20])
+    assert right["lower"]["lower_ball_joint"] == pytest.approx([1.3, -0.75, 0.20])
     assert right["spring"]["moving"]["point"] == pytest.approx([1.6, -0.56, 0.61])
     assert right["rocker"]["axis"] == pytest.approx([-1.0, 0.0, 0.0])
     assert right["spindle_axis"] == pytest.approx([0.0, 1.0, 0.0])
@@ -341,6 +343,11 @@ def test_geometry_rejects_unknown_fields_instead_of_ignoring_typos(tmp_path):
 
     with pytest.raises(ValueError, match=r"FL.*sprng"):
         _api("load_geometry")(_write_yaml(tmp_path, "typo.yaml", raw))
+
+    raw = _geometry()
+    raw["corners"]["FL"]["upper"]["outboard"] = raw["corners"]["FL"]["upper"].pop("upper_ball_joint")
+    with pytest.raises(ValueError, match=r"FL.*upper\.outboard.*upper_ball_joint"):
+        _api("load_geometry")(_write_yaml(tmp_path, "legacy-ball-joint.yaml", raw))
 
 
 def test_rocker_attachment_is_allowed_only_on_rocker_corner(tmp_path):

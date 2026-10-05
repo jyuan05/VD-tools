@@ -204,29 +204,40 @@ def _component_geometry(
     }
 
 
-def _wishbone(value: Any, path: str, length_scale: float) -> dict[str, list[float]]:
+def _wishbone(value: Any, path: str, length_scale: float, *, arm_name: str) -> dict[str, list[float]]:
     arm = _mapping(value, path)
+    ball_joint_name = f"{arm_name}_ball_joint"
+    other_ball_joint_name = "lower_ball_joint" if arm_name == "upper" else "upper_ball_joint"
     for legacy_name in ("inboard_a", "inboard_b"):
         if legacy_name in arm:
             raise ConfigError(
                 f"{path}.{legacy_name}: legacy wishbone pivot name; use inboard_forward or "
                 "inboard_rearward according to its chassis x position (x increases forward)"
             )
+    if "outboard" in arm:
+        raise ConfigError(
+            f"{path}.outboard: wishbone upright point was renamed to {path}.{ball_joint_name}"
+        )
+    if other_ball_joint_name in arm:
+        raise ConfigError(
+            f"{path}.{other_ball_joint_name}: joint name does not match the {arm_name} arm; "
+            f"use {path}.{ball_joint_name}"
+        )
     _fields(
         arm,
-        allowed={"inboard_forward", "inboard_rearward", "outboard"},
-        required={"inboard_forward", "inboard_rearward", "outboard"},
+        allowed={"inboard_forward", "inboard_rearward", ball_joint_name},
+        required={"inboard_forward", "inboard_rearward", ball_joint_name},
         path=path,
     )
     result = {
         key: _vector(arm[key], f"{path}.{key}", length_scale)
-        for key in ("inboard_forward", "inboard_rearward", "outboard")
+        for key in ("inboard_forward", "inboard_rearward", ball_joint_name)
     }
     if math.dist(result["inboard_rearward"], result["inboard_forward"]) <= _EPS:
         raise ConfigError(f"{path}.inboard_rearward/inboard_forward: wishbone pivot axis has zero length")
     for name in ("inboard_rearward", "inboard_forward"):
-        if math.dist(result[name], result["outboard"]) <= _EPS:
-            raise ConfigError(f"{path}.{name}/outboard: wishbone arm has zero length")
+        if math.dist(result[name], result[ball_joint_name]) <= _EPS:
+            raise ConfigError(f"{path}.{name}/{ball_joint_name}: wishbone arm has zero length")
     return result
 
 
@@ -282,8 +293,8 @@ def _parse_corner(
         # The spindle is an axial direction, oriented by the right-hand rule.
         "spindle_axis": _vector(corner["spindle_axis"], f"{path}.spindle_axis", normalize=True),
         "radius": _finite(corner["radius"], f"{path}.radius", minimum=0.0) * length_scale,
-        "lower": _wishbone(corner["lower"], f"{path}.lower", length_scale),
-        "upper": _wishbone(corner["upper"], f"{path}.upper", length_scale),
+        "lower": _wishbone(corner["lower"], f"{path}.lower", length_scale, arm_name="lower"),
+        "upper": _wishbone(corner["upper"], f"{path}.upper", length_scale, arm_name="upper"),
         "jounce_limits": _pair(corner["jounce_limits"], f"{path}.jounce_limits", length_scale),
         "spring": _component_geometry(corner["spring"], f"{path}.spring", length_scale, has_rocker=has_rocker),
     }
@@ -326,7 +337,7 @@ def _mirror_corner(value: dict[str, Any]) -> dict[str, Any]:
     result["wheel_center"] = _mirror_point(value["wheel_center"])
     result["spindle_axis"] = _mirror_axial(value["spindle_axis"])
     for wishbone in ("lower", "upper"):
-        for point in ("inboard_forward", "inboard_rearward", "outboard"):
+        for point in ("inboard_forward", "inboard_rearward", f"{wishbone}_ball_joint"):
             result[wishbone][point] = _mirror_point(value[wishbone][point])
     for point in ("inboard", "outboard"):
         result["tie"][point] = _mirror_point(value["tie"][point])

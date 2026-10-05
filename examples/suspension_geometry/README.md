@@ -38,6 +38,18 @@ the rear fixtures whose x coordinates are negative. Right-side reflection
 changes y only and keeps the forward/rearward names attached to the same
 physical hard points.
 
+Each wishbone's upright-side point is named for its ball joint:
+
+| Ball joint | Left corner path | Right corner path |
+| --- | --- | --- |
+| Front upper ball joint | `corners.FL.upper.upper_ball_joint` | `corners.FR.upper.upper_ball_joint` |
+| Front lower ball joint | `corners.FL.lower.lower_ball_joint` | `corners.FR.lower.lower_ball_joint` |
+| Rear upper ball joint | `corners.RL.upper.upper_ball_joint` | `corners.RR.upper.upper_ball_joint` |
+| Rear lower ball joint | `corners.RL.lower.lower_ball_joint` | `corners.RR.lower.lower_ball_joint` |
+
+These points are separate from the toe-link endpoints, `tie.inboard` and
+`tie.outboard`; the solver reports the moving toe-link point as `tie_outboard`.
+
 The studies include one-dimensional heave examples and a bounded 7 x 5 x 3
 heave/roll/pitch grid. Study file references are relative to each study file.
 After the command-line runner is available, the direct example can be checked

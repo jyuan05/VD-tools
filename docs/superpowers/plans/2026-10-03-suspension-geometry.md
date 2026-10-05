@@ -45,8 +45,8 @@ schema_version, id, synthetic, units {length: m, angle: rad}, reference_origin_w
 corners {FL, FR, RL, RR}, optionally mirror_right: true for supplied FL/RL
 each corner:
   wheel_center [3], spindle_axis [3], radius scalar
-  lower {inboard_rearward [3], inboard_forward [3], outboard [3]}
-  upper {inboard_rearward [3], inboard_forward [3], outboard [3]}
+  lower {inboard_rearward [3], inboard_forward [3], lower_ball_joint [3]}
+  upper {inboard_rearward [3], inboard_forward [3], upper_ball_joint [3]}
   tie {inboard [3], outboard [3]}
   jounce_limits [min,max]
   spring {type: direct|rocker, fixed [3], moving: Attachment, length_limits [min,max]}
@@ -65,7 +65,7 @@ Setup dictionary: `schema_version`, `id`, `units {length,force,angle}`, `corners
 Study dictionary: geometry/setup relative paths; `axes {heave,roll,pitch}` as explicit arrays or `{min,max,count}`; `units {length,angle}`; `reference [3]`; `metrics` list; `plots` list; `solver {max_samples, max_nfev, residual_tolerance, derivative_steps [3], jounce_step}`. Default limits: max_samples=2000, max_nfev=100, residual_tolerance=1e-9 m, derivative_steps=[1e-4,1e-4,1e-4], jounce_step=1e-4 m. Reject nonfinite axes, repeated/unsorted values, invalid sample counts and unknown metric names at the correct layer. One-element axes are allowed; reference need not be the grid midpoint.
 
 `solve_corner(corner, jounce, seed=None, max_nfev=100, tolerance=1e-9) -> CornerState`:
-state has `valid`, `reason`, `jounce`, `wheel_center [3]`, `rotation [3,3]`, `upper_outboard [3]`, `lower_outboard [3]`, `tie_outboard [3]`, `residual`, `condition`, `solution [6]`. Invalid states carry finite diagnostic values where available but invalid physical outputs are NaN. Rotation is the increment from nominal upright orientation. `solve_corner_sweep(corner,jounces,...)` starts at zero, continues separately outward in both directions and preserves caller order. `attachment_position(corner, state, attachment) -> [3]` and `actuation_state(corner,state) -> dict` expose moving positions, spring/damper compression, rocker angle and stroke margins. `arb_angles(geometry,states) -> dict` exposes signed left/right lever angles.
+state has `valid`, `reason`, `jounce`, `wheel_center [3]`, `rotation [3,3]`, `upper_ball_joint [3]`, `lower_ball_joint [3]`, `tie_outboard [3]`, `residual`, `condition`, `solution [6]`. Invalid states carry finite diagnostic values where available but invalid physical outputs are NaN. Rotation is the increment from nominal upright orientation. `solve_corner_sweep(corner,jounces,...)` starts at zero, continues separately outward in both directions and preserves caller order. `attachment_position(corner, state, attachment) -> [3]` and `actuation_state(corner,state) -> dict` expose moving positions, spring/damper compression, rocker angle and stroke margins. `arb_angles(geometry,states) -> dict` exposes signed left/right lever angles.
 
 `component_law(spec, displacement) -> (energy, force, tangent)` includes preload consistently relative to the reference; energy differences may be negative around a loaded reference. `wheel_energy(geometry,setup,jounce_vector,...) -> dict` returns total/component energy, corner states and actuation. `wheel_response(...) -> dict` returns energy, gradient [4], stiffness [4,4], material rates [4], motion ratios [4], validity and component contributions.
 
@@ -145,4 +145,6 @@ At the end run the full Python suite, direct and rocker demo studies, a nonzero 
 
 ## Hard-point naming clarification (2026-10-05)
 
-The user names the chassis-side wishbone points: front upper forward, front upper rearward, front lower forward, front lower rearward, rear upper forward, rear upper rearward, rear lower forward, rear lower rearward. Each label applies to the corresponding left and right corner. Within the existing corner/upper-or-lower hierarchy, canonical keys are inboard_forward and inboard_rearward. The outboard ball joint is unchanged. In the synthetic fixtures, the forward pivot is the larger chassis-x coordinate: old inboard_b becomes inboard_forward; old inboard_a becomes inboard_rearward. Coordinates, units and physical constraints remain unchanged. This naming update applies to all remaining task interfaces and exports; it does not expand the physics scope.
+The user names the chassis-side wishbone points: front upper forward, front upper rearward, front lower forward, front lower rearward, rear upper forward, rear upper rearward, rear lower forward, rear lower rearward. Each label applies to the corresponding left and right corner. Within the existing corner/upper-or-lower hierarchy, canonical keys are inboard_forward and inboard_rearward. In the synthetic fixtures, the forward pivot is the larger chassis-x coordinate: old inboard_b becomes inboard_forward; old inboard_a becomes inboard_rearward. Coordinates, units and physical constraints remain unchanged. This naming update applies to all remaining task interfaces and exports; it does not expand the physics scope.
+
+The user names the upright-side points upper ball joint and lower ball joint. The canonical geometry fields are `upper.upper_ball_joint` and `lower.lower_ball_joint`; `CornerState` reports `upper_ball_joint` and `lower_ball_joint`, while `tie.outboard` and `tie_outboard` keep their separate toe-link meaning. This supersedes the earlier note that the outboard ball joint was unchanged. Coordinates, units and physical constraints remain unchanged.

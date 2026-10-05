@@ -25,8 +25,8 @@ def _wishbone_angle(corner: dict, state: CornerState, name: str) -> float:
     pivot_forward = np.asarray(arm["inboard_forward"], dtype=float)
     axis = pivot_forward - pivot_rearward
     axis /= np.linalg.norm(axis)
-    reference = np.asarray(arm["outboard"], dtype=float) - pivot_rearward
-    actual = np.asarray(getattr(state, f"{name}_outboard"), dtype=float) - pivot_rearward
+    reference = np.asarray(arm[f"{name}_ball_joint"], dtype=float) - pivot_rearward
+    actual = np.asarray(getattr(state, f"{name}_ball_joint"), dtype=float) - pivot_rearward
     reference -= axis * np.dot(reference, axis)
     actual -= axis * np.dot(actual, axis)
     return float(np.arctan2(np.dot(axis, np.cross(reference, actual)), np.dot(reference, actual)))

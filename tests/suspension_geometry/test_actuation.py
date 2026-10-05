@@ -47,18 +47,20 @@ def _rotate_about(point: np.ndarray, origin: np.ndarray, axis: np.ndarray, angle
     return origin + Rotation.from_rotvec(axis * angle).apply(point - origin)
 
 
-def _arm_angle(arm: dict, actual_outboard: np.ndarray) -> float:
+def _arm_angle(arm: dict, actual_ball_joint: np.ndarray, joint_key: str) -> float:
     first = np.asarray(arm["inboard_rearward"], dtype=float)
     axis = np.asarray(arm["inboard_forward"], dtype=float) - first
     axis /= np.linalg.norm(axis)
-    reference = np.asarray(arm["outboard"], dtype=float)
+    reference = np.asarray(arm[joint_key], dtype=float)
     r0 = reference - first - axis * np.dot(reference - first, axis)
-    r1 = actual_outboard - first - axis * np.dot(actual_outboard - first, axis)
+    r1 = actual_ball_joint - first - axis * np.dot(actual_ball_joint - first, axis)
     return float(np.arctan2(np.dot(axis, np.cross(r0, r1)), np.dot(r0, r1)))
 
 
 def _expected_lower_point(corner: dict, state, point) -> np.ndarray:
-    angle = _arm_angle(corner["lower"], np.asarray(state.lower_outboard, dtype=float))
+    angle = _arm_angle(
+        corner["lower"], np.asarray(state.lower_ball_joint, dtype=float), "lower_ball_joint"
+    )
     arm = corner["lower"]
     axis = np.asarray(arm["inboard_forward"], dtype=float) - arm["inboard_rearward"]
     axis /= np.linalg.norm(axis)

@@ -37,8 +37,8 @@ def _point_map(corner: dict, state) -> dict[str, np.ndarray]:
     center = np.asarray(corner["wheel_center"], dtype=float)
     return {
         "wheel_center": np.asarray(state.wheel_center, dtype=float),
-        "lower": np.asarray(state.lower_outboard, dtype=float),
-        "upper": np.asarray(state.upper_outboard, dtype=float),
+        "lower": np.asarray(state.lower_ball_joint, dtype=float),
+        "upper": np.asarray(state.upper_ball_joint, dtype=float),
         "tie": np.asarray(state.tie_outboard, dtype=float),
     }
 
@@ -46,9 +46,9 @@ def _point_map(corner: dict, state) -> dict[str, np.ndarray]:
 def _assert_nominal_link_lengths(corner: dict, state) -> None:
     for name in ("lower", "upper"):
         arm = corner[name]
-        point = np.asarray(getattr(state, f"{name}_outboard"), dtype=float)
+        point = np.asarray(getattr(state, f"{name}_ball_joint"), dtype=float)
         for pivot in ("inboard_rearward", "inboard_forward"):
-            expected = np.linalg.norm(np.asarray(arm["outboard"]) - arm[pivot])
+            expected = np.linalg.norm(np.asarray(arm[f"{name}_ball_joint"]) - arm[pivot])
             actual = np.linalg.norm(point - np.asarray(arm[pivot]))
             assert actual == pytest.approx(expected, abs=2e-9)
     tie = corner["tie"]
@@ -85,8 +85,8 @@ def test_solved_pose_preserves_all_upright_distances_and_sets_wheel_height(jounc
     _assert_nominal_link_lengths(corner, state)
     nominal = {
         "wheel_center": np.asarray(corner["wheel_center"], dtype=float),
-        "lower": np.asarray(corner["lower"]["outboard"], dtype=float),
-        "upper": np.asarray(corner["upper"]["outboard"], dtype=float),
+        "lower": np.asarray(corner["lower"]["lower_ball_joint"], dtype=float),
+        "upper": np.asarray(corner["upper"]["upper_ball_joint"], dtype=float),
         "tie": np.asarray(corner["tie"]["outboard"], dtype=float),
     }
     actual = _point_map(corner, state)
@@ -129,11 +129,11 @@ def test_mirrored_corner_solutions_are_reflections_with_axial_rotation_signs():
         assert right_state.rotation == pytest.approx(
             reflection @ left_state.rotation @ reflection, abs=2e-8
         )
-        assert right_state.lower_outboard == pytest.approx(
-            reflection @ left_state.lower_outboard, abs=2e-8
+        assert right_state.lower_ball_joint == pytest.approx(
+            reflection @ left_state.lower_ball_joint, abs=2e-8
         )
-        assert right_state.upper_outboard == pytest.approx(
-            reflection @ left_state.upper_outboard, abs=2e-8
+        assert right_state.upper_ball_joint == pytest.approx(
+            reflection @ left_state.upper_ball_joint, abs=2e-8
         )
         assert right_state.tie_outboard == pytest.approx(
             reflection @ left_state.tie_outboard, abs=2e-8

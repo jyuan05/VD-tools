@@ -115,7 +115,7 @@ Tyre-inclusive rates are a separate local calculation that permits vertical whee
 
 ## Kinematic solver and numerical behavior
 
-Model wishbones and upright as rigid bodies with revolute chassis pivots and spherical outboard joints. Solve the upright pose at prescribed jounce using wishbone and toe-link constraints. Solve rocker/rod geometry on the same physical assembly branch.
+Model wishbones and upright as rigid bodies with revolute chassis pivots and upper and lower spherical ball joints. Solve the upright pose at prescribed jounce using wishbone and toe-link constraints. Solve rocker/rod geometry on the same physical assembly branch.
 
 Start at the reference pose, verify constraint closure, and use continuation through adjacent samples. Do not accept an optimizer exit flag alone: check scaled link/joint residuals, assembly branch, component stroke, limits and conditioning. Retry within fixed limits; never silently jump to another assembly branch.
 

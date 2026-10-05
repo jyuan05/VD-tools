@@ -32,8 +32,8 @@ class CornerState:
     jounce: float
     wheel_center: np.ndarray
     rotation: np.ndarray
-    upper_outboard: np.ndarray
-    lower_outboard: np.ndarray
+    upper_ball_joint: np.ndarray
+    lower_ball_joint: np.ndarray
     tie_outboard: np.ndarray
     residual: float
     condition: float
@@ -54,8 +54,8 @@ def _invalid_state(
         jounce=jounce,
         wheel_center=_NAN3.copy(),
         rotation=_NAN33.copy(),
-        upper_outboard=_NAN3.copy(),
-        lower_outboard=_NAN3.copy(),
+        upper_ball_joint=_NAN3.copy(),
+        lower_ball_joint=_NAN3.copy(),
         tie_outboard=_NAN3.copy(),
         residual=float(residual),
         condition=float(condition),
@@ -72,8 +72,8 @@ def _pose(corner: dict, solution: np.ndarray) -> tuple[np.ndarray, np.ndarray, d
         return center + rotation @ (np.asarray(point, dtype=float) - reference_center)
 
     points = {
-        "lower": upright_point(corner["lower"]["outboard"]),
-        "upper": upright_point(corner["upper"]["outboard"]),
+        "lower": upright_point(corner["lower"]["lower_ball_joint"]),
+        "upper": upright_point(corner["upper"]["upper_ball_joint"]),
         "tie": upright_point(corner["tie"]["outboard"]),
     }
     return center, rotation, points
@@ -85,7 +85,7 @@ def _constraints(solution: np.ndarray, corner: dict, jounce: float) -> np.ndarra
     constraints: list[float] = []
     for name in ("lower", "upper"):
         arm = corner[name]
-        nominal = np.asarray(arm["outboard"], dtype=float)
+        nominal = np.asarray(arm[f"{name}_ball_joint"], dtype=float)
         current = points[name]
         for pivot_name in ("inboard_rearward", "inboard_forward"):
             pivot = np.asarray(arm[pivot_name], dtype=float)
@@ -105,7 +105,7 @@ def _condition_number(jacobian: np.ndarray, corner: dict) -> float:
     # the corner's upright-to-wheel-centre lever arm.
     center = np.asarray(corner["wheel_center"], dtype=float)
     lever_arms = [
-        np.linalg.norm(np.asarray(corner[name]["outboard"], dtype=float) - center)
+        np.linalg.norm(np.asarray(corner[name][f"{name}_ball_joint"], dtype=float) - center)
         for name in ("lower", "upper")
     ]
     characteristic_length = max(float(np.mean(lever_arms)), 0.1)
@@ -249,8 +249,8 @@ def solve_corner(
         jounce=requested_jounce,
         wheel_center=center,
         rotation=rotation,
-        upper_outboard=points["upper"],
-        lower_outboard=points["lower"],
+        upper_ball_joint=points["upper"],
+        lower_ball_joint=points["lower"],
         tie_outboard=points["tie"],
         residual=residual,
         condition=condition,
