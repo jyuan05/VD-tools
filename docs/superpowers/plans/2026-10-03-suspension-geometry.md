@@ -45,20 +45,20 @@ schema_version, id, synthetic, units {length: m, angle: rad}, reference_origin_w
 corners {FL, FR, RL, RR}, optionally mirror_right: true for supplied FL/RL
 each corner:
   wheel_center [3], spindle_axis [3], radius scalar
-  lower {inboard_a [3], inboard_b [3], outboard [3]}
-  upper {inboard_a [3], inboard_b [3], outboard [3]}
+  lower {inboard_rearward [3], inboard_forward [3], outboard [3]}
+  upper {inboard_rearward [3], inboard_forward [3], outboard [3]}
   tie {inboard [3], outboard [3]}
   jounce_limits [min,max]
   spring {type: direct|rocker, fixed [3], moving: Attachment, length_limits [min,max]}
   damper: same geometry as spring, optional (defaults explicitly to spring geometry)
-  rocker (if used): pivot [3], axis [3], rod_point [3], spring_point [3],
+  rocker (if used): pivot [3], axis [3], rod_point [3],
                      rod_mount Attachment, angle_limits [min,max]
-Attachment = {body: chassis|upright|lower|upper, point: [3]} with all point positions at the reference pose
+Attachment = {body: chassis|upright|lower|upper|rocker, point: [3]} with all point positions at the reference pose
 arbs: optional {front,rear}; each axle {left: Lever, right: Lever}
 Lever = {pivot [3], axis [3], tip [3], pickup: Attachment, angle_limits [min,max]}
 ```
 
-Moving reference points rotate with their specified body; the upright rotates about its reference wheel centre, and wishbone points rotate about the inboard pivot axis. Axial vectors (rocker/lever axes) mirror with det(S) S; polar vectors/points mirror with S = diag(1,-1,1). Reflection of a joint's entire geometry must preserve physical actuation. Document spindle-axis convention consistently and normalize direction vectors. Explicit four-corner input remains supported.
+Rocker moving attachments are allowed only for spring/damper endpoints in corners with a rocker; spring.moving.point and damper.moving.point supply their own reference positions. spring.fixed/damper.fixed are chassis-fixed. There is no redundant rocker.spring_point field. Moving reference points rotate with their specified body; the upright rotates about its reference wheel centre, and wishbone points rotate about the inboard pivot axis. Axial vectors (rocker/lever axes) mirror with det(S) S; polar vectors/points mirror with S = diag(1,-1,1). Reflection of a joint's entire geometry must preserve physical actuation. Document spindle-axis convention consistently and normalize direction vectors. Explicit four-corner input remains supported.
 
 Setup dictionary: `schema_version`, `id`, `units {length,force,angle}`, `corners {FL,...}`, `arbs {front,rear}`. Each corner has `spring {rate, preload_force}` or `spring {curve: [[compression,force],...]}`; exclusive alternatives, finite increasing abscissae, passive tangent; optional `bump_stop {engagement,rate}` or force curve; optional `tyre {rate,reference_force}` or force curve. Preload compression, if supported, is converted to reference force and conflicts are rejected. ARB law is `{rate,reference_twist}` or torque/twist curve. Omitted bars mean zero contribution; an active setup bar with no geometry is a config error. Curve domain violations are invalid states, not extrapolation.
 
@@ -141,3 +141,8 @@ state has `valid`, `reason`, `jounce`, `wheel_center [3]`, `rotation [3,3]`, `up
 Each task gets a fresh Luna Max reviewer with spec, task brief, report and a base-to-head diff. The parent settles interface ambiguities and sends bounded fix rounds to the original implementer. Local feature commits are permitted; no push or merge.
 
 At the end run the full Python suite, direct and rocker demo studies, a nonzero heave/roll/pitch unequal-grid map, no-tyre and invalid-domain checks, and actual MATLAB HDF5/interpolation round trip. Inspect representative PNG outputs. Record runtime, validity counts, output size, branch, revision and dirty state. A broad final Luna Max review must identify correctness/spec gaps; resolve material findings before reporting completion. No tests or simulations in the unrelated C:/VD checkout.
+
+
+## Hard-point naming clarification (2026-10-05)
+
+The user names the chassis-side wishbone points: front upper forward, front upper rearward, front lower forward, front lower rearward, rear upper forward, rear upper rearward, rear lower forward, rear lower rearward. Each label applies to the corresponding left and right corner. Within the existing corner/upper-or-lower hierarchy, canonical keys are inboard_forward and inboard_rearward. The outboard ball joint is unchanged. In the synthetic fixtures, the forward pivot is the larger chassis-x coordinate: old inboard_b becomes inboard_forward; old inboard_a becomes inboard_rearward. Coordinates, units and physical constraints remain unchanged. This naming update applies to all remaining task interfaces and exports; it does not expand the physics scope.
