@@ -65,6 +65,7 @@ class TestLogWindow:
         self.tree: ttk.Treeview | None = None
         self.fields: dict[str, tk.Widget] = {}
         self.actions: dict[str, ttk.Button] = {}
+        self.copy_setup_button: ttk.Button | None = None
         self.attachment_list: tk.Listbox | None = None
         self.status_label: ttk.Label | None = None
         self.dirty_label: ttk.Label | None = None
@@ -188,6 +189,7 @@ class TestLogWindow:
     def _show_editor(self, kind: str | None, record, *, is_new: bool, context_id: str | None = None) -> None:
         if self._editor_frame is None:
             return
+        self.copy_setup_button = None
         for child in self._editor_frame.winfo_children():
             child.destroy()
         self.fields = {}
@@ -222,9 +224,19 @@ class TestLogWindow:
         panel.columnconfigure(0, weight=1)
         panel.rowconfigure(1, weight=1)
         title = {"day": "Test Day", "setup": "Vehicle Setup", "lap": "Lap Record"}[kind]
-        ttk.Label(panel, text=("New " if is_new else "Edit ") + title, font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 6)
+        heading = ttk.Frame(panel)
+        heading.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        heading.columnconfigure(0, weight=1)
+        ttk.Label(heading, text=("New " if is_new else "Edit ") + title, font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, sticky="w"
         )
+        if kind == "setup":
+            self.copy_setup_button = ttk.Button(
+                heading,
+                text="Copy to another day…",
+                command=self.copy_setup_to_another_day,
+            )
+            self.copy_setup_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
         if kind == "setup":
             notebook = ttk.Notebook(panel)
@@ -695,6 +707,14 @@ class TestLogWindow:
         self.actions["add_lap"].state(["!disabled"] if setup_id else ["disabled"])
         duplicate_ok = bool(setup_id and self.services.get_setup(setup_id))
         self.actions["duplicate_setup"].state(["!disabled"] if duplicate_ok else ["disabled"])
+        if self.copy_setup_button is not None:
+            copy_ok = bool(
+                self._current_kind == "setup"
+                and isinstance(self._record, Setup)
+                and not self._is_new
+                and self.services.get_setup(self._record.id)
+            )
+            self.copy_setup_button.state(["!disabled"] if copy_ok else ["disabled"])
         self.actions["move_lap_up"].state(["!disabled"] if has_lap else ["disabled"])
         self.actions["move_lap_down"].state(["!disabled"] if has_lap else ["disabled"])
         self.actions["save"].state(["!disabled"] if self._current_kind else ["disabled"])
@@ -741,6 +761,86 @@ class TestLogWindow:
         self.refresh_tree(select_item=f"setup:{duplicate.id}")
         self._show_editor("setup", duplicate, is_new=False)
         self._set_status("Setup duplicated. Review its details and save any changes.")
+
+    def _choose_copy_destination(self, destinations: list[TestDay]) -> str | None:
+        day_id_by_label: dict[str, str] = {}
+        labels: list[str] = []
+        for day in destinations:
+            label_base = f"{day.date} · {day.location}"
+            id_length = 8
+            label = f"{label_base} [{day.id[:id_length]}]"
+            while label in day_id_by_label and day_id_by_label[label] != day.id:
+                id_length += 4
+                label = f"{label_base} [{day.id[:id_length]}]"
+            labels.append(label)
+            day_id_by_label[label] = day.id
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Copy setup to another day")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.columnconfigure(0, weight=1)
+        selected_day_id: list[str | None] = [None]
+
+        def close(selection: str | None = None) -> None:
+            selected_day_id[0] = selection
+            if dialog.winfo_exists():
+                try:
+                    dialog.grab_release()
+                except tk.TclError:
+                    pass
+                dialog.destroy()
+
+        def accept() -> None:
+            destination_id = day_id_by_label.get(destination_choice.get())
+            if destination_id is not None:
+                close(destination_id)
+
+        body = ttk.Frame(dialog, padding=12)
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        ttk.Label(body, text="Choose a destination test day:").grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        destination_choice = ttk.Combobox(body, values=labels, state="readonly", width=52)
+        destination_choice.grid(row=1, column=0, sticky="ew")
+        destination_choice.current(0)
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=2, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="Cancel", command=close).pack(side="right")
+        ttk.Button(buttons, text="Copy", command=accept).pack(side="right", padx=(0, 6))
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", lambda _event: close())
+        dialog.bind("<Return>", lambda _event: accept())
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+        return selected_day_id[0]
+
+    def copy_setup_to_another_day(self) -> None:
+        if not self._resolve_unsaved():
+            return
+        setup_id = self._selected_setup_id()
+        setup = self.services.get_setup(setup_id) if setup_id else None
+        if setup is None:
+            self._set_status("Select a saved setup to copy.")
+            return
+        destinations = [day for day in self.services.list_days() if day.id != setup.test_day_id]
+        if not destinations:
+            self._set_status("Create another test day before copying this setup.")
+            return
+        destination_day_id = self._choose_copy_destination(destinations)
+        if destination_day_id is None:
+            return
+        try:
+            copied = self.services.copy_setup_to_day(setup_id, destination_day_id)
+        except Exception as error:
+            self._set_status(f"Could not copy setup: {error}")
+            messagebox.showerror("Copy setup", str(error), parent=self.root)
+            return
+        self.refresh_tree(select_item=f"setup:{copied.id}")
+        self._show_editor("setup", copied, is_new=False)
+        self._set_status("Setup copied to the selected test day.")
 
     def _setup_settings_json(self, values: dict[str, str]) -> str:
         settings: dict[str, object] = {}

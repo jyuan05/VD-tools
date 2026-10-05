@@ -53,10 +53,10 @@ class TestLogUiTests(unittest.TestCase):
         self.root.update()
         return self.window
 
-    def make_day(self, location="Test Site"):
+    def make_day(self, location="Test Site", date="2026-10-05"):
         return TestDay(
             id=new_id(),
-            date="2026-10-05",
+            date=date,
             location=location,
             weather=None,
             notes=None,
@@ -115,9 +115,9 @@ class TestLogUiTests(unittest.TestCase):
             created_at=utc_now_iso(),
         )
 
-    def save_hierarchy(self, *, with_lap=True):
+    def save_hierarchy(self, *, with_lap=True, setup_name="Baseline"):
         day = self.services.save_day(self.make_day())
-        setup = self.services.save_setup(self.make_setup(day.id))
+        setup = self.services.save_setup(self.make_setup(day.id, name=setup_name))
         event = self.services.save_event_layout(self.make_event())
         lap = self.services.save_lap(self.make_lap(setup.id, event.id)) if with_lap else None
         return day, setup, event, lap
@@ -137,8 +137,70 @@ class TestLogUiTests(unittest.TestCase):
         tree.selection_set(item_id)
         self.root.update()
 
+    def find_widgets(self, parent, widget_type):
+        found = []
+        for child in parent.winfo_children():
+            if isinstance(child, widget_type):
+                found.append(child)
+            found.extend(self.find_widgets(child, widget_type))
+        return found
+
+    def interact_with_copy_dialog(self, window, callback):
+        callback_errors = []
+
+        def interact():
+            dialog = None
+            try:
+                dialog = next(
+                    child
+                    for child in self.root.winfo_children()
+                    if isinstance(child, tk.Toplevel)
+                    and child.title() == "Copy setup to another day"
+                )
+                callback(dialog)
+            except BaseException as error:
+                callback_errors.append(error)
+                if dialog is not None and dialog.winfo_exists():
+                    cancel = next(
+                        (
+                            button
+                            for button in self.find_widgets(dialog, ttk.Button)
+                            if button.cget("text") == "Cancel"
+                        ),
+                        None,
+                    )
+                    if cancel is not None:
+                        cancel.invoke()
+
+        copy_button = window.copy_setup_button
+        self.root.after(0, interact)
+        copy_button.invoke()
+        if callback_errors:
+            raise callback_errors[0]
+
+    def choose_copy_destination(self, window, day_id):
+        choices = []
+
+        def choose(dialog):
+            combo = self.find_widgets(dialog, ttk.Combobox)[0]
+            values = tuple(str(value) for value in combo.cget("values"))
+            choices.extend(values)
+            label = next(value for value in values if day_id[:8] in value)
+            combo.set(label)
+            button = next(
+                item
+                for item in self.find_widgets(dialog, ttk.Button)
+                if item.cget("text") == "Copy"
+            )
+            button.invoke()
+
+        self.interact_with_copy_dialog(window, choose)
+        return tuple(choices)
+
     def test_minimum_main_window_keeps_setup_and_lap_controls_visible(self):
-        _, setup, _, lap = self.save_hierarchy()
+        _, setup, _, lap = self.save_hierarchy(
+            setup_name="Baseline setup with a long descriptive testing title"
+        )
         window = self.require_window()
         self.root.deiconify()
         self.root.geometry("900x580")
@@ -182,6 +244,14 @@ class TestLogUiTests(unittest.TestCase):
                 tree_bounds = assert_inside_client(window.tree, "record tree")
                 attachment_bounds = assert_inside_client(window.attachment_list, "attachment list")
                 if item_id.startswith("setup:"):
+                    copy_bounds = assert_inside_client(window.copy_setup_button, "copy setup button")
+                    title_label = next(
+                        label
+                        for label in self.find_widgets(window._editor_frame, ttk.Label)
+                        if label.cget("text") == "Edit Vehicle Setup"
+                    )
+                    title_bounds = assert_inside_client(title_label, "setup editor title")
+                    self.assertFalse(overlaps(copy_bounds, title_bounds))
                     reachable_fields = set()
                     for tab_id in window.setup_notebook.tabs():
                         window.setup_notebook.select(tab_id)
@@ -625,6 +695,103 @@ class TestLogUiTests(unittest.TestCase):
         self.assertEqual(window.fields["FL_pressure"].get(), "20")
         self.assertEqual(duplicate.order, 2)
         self.assertTrue(window.tree.exists(f"setup:{duplicate.id}"))
+    def test_copy_setup_to_another_day_uses_visible_id_mapping_and_selects_the_copy(self):
+        source_day = self.services.save_day(self.make_day(date="2026-10-05"))
+        first_destination = self.services.save_day(self.make_day(date="2026-10-06"))
+        second_destination = self.services.save_day(self.make_day(date="2026-10-06"))
+        setup = self.services.save_setup(self.make_setup(source_day.id))
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+
+        choices = self.choose_copy_destination(window, second_destination.id)
+
+        self.assertEqual(len(choices), 2)
+        self.assertEqual(len(set(choices)), 2)
+        self.assertTrue(any(first_destination.id[:8] in label for label in choices))
+        self.assertTrue(any(second_destination.id[:8] in label for label in choices))
+        copied = self.services.list_setups(second_destination.id)[0]
+        self.assertEqual(copied.name, setup.name)
+        self.assertEqual(copied.setup_code, setup.setup_code)
+        self.assertEqual(window.tree.selection(), (f"setup:{copied.id}",))
+        self.assertEqual(window._record.id, copied.id)
+        self.assertEqual(window.status_label.cget("text"), "Setup copied to the selected test day.")
+
+    def test_copy_setup_dialog_cancel_and_window_close_leave_records_and_selection_unchanged(self):
+        source_day = self.services.save_day(self.make_day())
+        destination_day = self.services.save_day(self.make_day(date="2026-10-06"))
+        setup = self.services.save_setup(self.make_setup(source_day.id))
+        window = self.require_window()
+        selected_item = f"setup:{setup.id}"
+        self.select_tree_item(window.tree, selected_item)
+
+        for close_by_window_manager in (False, True):
+            def close(dialog):
+                if close_by_window_manager:
+                    callback = dialog.protocol("WM_DELETE_WINDOW")
+                    dialog.tk.call(callback)
+                else:
+                    cancel = next(
+                        button
+                        for button in self.find_widgets(dialog, ttk.Button)
+                        if button.cget("text") == "Cancel"
+                    )
+                    cancel.invoke()
+
+            with self.subTest(close_by_window_manager=close_by_window_manager):
+                self.interact_with_copy_dialog(window, close)
+                self.assertEqual(self.services.list_setups(destination_day.id), [])
+                self.assertEqual(window.tree.selection(), (selected_item,))
+                self.assertEqual(window._record.id, setup.id)
+
+    def test_copy_setup_dirty_save_discard_and_cancel_are_resolved_before_dialog(self):
+        source_day = self.services.save_day(self.make_day())
+        save_destination = self.services.save_day(self.make_day(date="2026-10-06"))
+        discard_destination = self.services.save_day(self.make_day(date="2026-10-07"))
+        setup = self.services.save_setup(self.make_setup(source_day.id))
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+
+        self.set_field(window.fields["notes"], "Saved before copying")
+        with patch("tkinter.messagebox.askyesnocancel", return_value=True):
+            self.choose_copy_destination(window, save_destination.id)
+            copied_after_save = self.services.list_setups(save_destination.id)
+            self.assertEqual(len(copied_after_save), 1)
+        self.assertEqual(self.services.get_setup(setup.id).notes, "Saved before copying")
+        self.assertEqual(copied_after_save[0].notes, "Saved before copying")
+
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        self.set_field(window.fields["notes"], "Discard this edit")
+        with patch("tkinter.messagebox.askyesnocancel", return_value=False):
+            self.choose_copy_destination(window, discard_destination.id)
+        copied_after_discard = self.services.list_setups(discard_destination.id)
+        self.assertEqual(len(copied_after_discard), 1)
+        self.assertEqual(self.services.get_setup(setup.id).notes, "Saved before copying")
+        self.assertEqual(copied_after_discard[0].notes, "Saved before copying")
+
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        self.set_field(window.fields["notes"], "Keep this edit after Cancel")
+        with patch("tkinter.messagebox.askyesnocancel", return_value=None) as decision:
+            window.copy_setup_button.invoke()
+        decision.assert_called_once()
+        self.assertEqual(self.services.list_setups(discard_destination.id), copied_after_discard)
+        self.assertEqual(window.fields["notes"].get("1.0", "end-1c"), "Keep this edit after Cancel")
+
+    def test_copy_setup_without_another_day_reports_feedback_and_new_setup_action_is_disabled(self):
+        source_day = self.services.save_day(self.make_day())
+        setup = self.services.save_setup(self.make_setup(source_day.id))
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"setup:{setup.id}")
+        self.assertFalse(window.copy_setup_button.instate(["disabled"]))
+
+        window.copy_setup_button.invoke()
+
+        self.assertIn("create another test day", window.status_label.cget("text").lower())
+        self.assertEqual(self.services.list_setups(source_day.id), [setup])
+        self.select_tree_item(window.tree, f"day:{source_day.id}")
+        window.actions["add_setup"].invoke()
+        self.assertTrue(window.copy_setup_button.instate(["disabled"]))
+
+
     def test_identical_event_labels_keep_distinct_internal_ids(self):
         day = self.services.save_day(self.make_day())
         setup = self.services.save_setup(self.make_setup(day.id))

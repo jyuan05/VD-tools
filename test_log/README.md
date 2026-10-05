@@ -57,6 +57,8 @@ A setup export uses these columns, in order:
 
 Lap times use m:ss.sss formatting. Valid and invalid laps are included.
 
+To carry a saved setup to another test day, open the setup and choose Copy to another day. The copy keeps its setup label, Setup ID, settings, driver and event defaults, with independent copies of its attachments; laps stay with the original setup.
+
 ## Tests
 
 Run the complete test suite from the project folder. Tests use temporary data folders.

@@ -351,6 +351,39 @@ class TestLogServices:
         self._ensure_open()
         return self._repository.best_laps_by_event(setup_id)
 
+    def copy_setup_to_day(self, setup_id: str, destination_day_id: str) -> Setup:
+        with self._mutation():
+            original = self._repository.get_setup(setup_id)
+            if original is None:
+                raise ValidationError("setup_id", "The setup no longer exists.")
+            destination = self._repository.get_day(destination_day_id)
+            if destination is None:
+                raise ValidationError("destination_day_id", "Select an existing destination test day.")
+            if original.test_day_id == destination.id:
+                raise ValidationError("destination_day_id", "Choose a different test day.")
+
+            copied_attachments: list[StagedAttachment] = []
+            try:
+                for attachment in self._repository.list_attachments("setup", setup_id):
+                    source = self._attachments.resolve(attachment)
+                    copied = self._attachments.stage(source, attachment.role)
+                    copied = replace(copied, original_name=attachment.original_name)
+                    self._staged[copied.relative_path] = copied
+                    copied_attachments.append(copied)
+                destination_setups = self._repository.list_setups(destination.id)
+                next_order = max((setup.order for setup in destination_setups), default=0) + 1
+                copied_setup = replace(
+                    original,
+                    id=new_id(),
+                    test_day_id=destination.id,
+                    order=next_order,
+                    created_at=utc_now_iso(),
+                )
+                return self._save(self._repository.save_setup, copied_setup, copied_attachments)
+            except BaseException as error:
+                self._add_cleanup_note(error, self._discard_owned(copied_attachments))
+                raise
+
     def duplicate_setup(self, identifier: str) -> Setup:
         with self._mutation():
             original = self._repository.get_setup(identifier)
