@@ -4,24 +4,14 @@ The offline desktop app records test days, vehicle setups, event/layouts, lap ti
 
 ## Start the app
 
-On Windows, double-click launch.cmd. To choose a data folder, run the launcher from any working directory:
-
-    & 'C:\VD Tools\test_log\launch.cmd' -DataDir 'D:\Vehicle Test Data\October'
-
-You can call the PowerShell launcher directly with the same option:
-
-    & 'C:\VD Tools\test_log\launch.ps1' -DataDir 'D:\Vehicle Test Data\October'
-
-A relative -DataDir is resolved against the directory from which the launcher was started. Without -DataDir, the app uses %LOCALAPPDATA%\VDTestLog, or VDTestLog under the user’s home directory when LOCALAPPDATA is unavailable.
-
-The launcher checks py -3.12, then python, then the bundled Codex Python runtime. It accepts the first Python 3.12+ interpreter that imports sqlite3 and can create, withdraw, update, and destroy a real Tk window. Install no dependencies; if no candidate works, install or repair Python 3.12+ with Tcl/Tk enabled.
+On Windows, double-click launch.cmd.
 
 On macOS or Linux, run the portable shell launcher from any working directory:
 
     sh '/path/to/test_log/launch.sh' --data-dir "$HOME/Vehicle Test Data"
     sh '/path/to/test_log/launch.sh' --help
 
-The shell launcher loads the app from its own folder, preserves your current working directory (so a relative `--data-dir` is resolved from there), forwards its arguments to `python3 -m vd_test_log`, and checks for Python 3.12+ with Tkinter and sqlite3. You can also start the app directly with `python3 -m vd_test_log` from this folder. The app uses `~/VDTestLog` by default on macOS and Linux. The launcher is invoked through `sh`, so it does not depend on an executable file permission.
+You can also start the app directly with `python3 -m vd_test_log` from this folder. The app uses `~/VDTestLog` by default on macOS and Linux. The launcher is invoked through `sh`, so it does not depend on an executable file permission.
 
 On macOS, double-click `launch.command` in Finder to start the app in Terminal. It requires Python 3.12 or newer with Tkinter and sqlite3. If an archive extractor removed its executable permission, run this once in Terminal:
 
@@ -57,7 +47,7 @@ This opens the snapshot in place. Copy the backup folder first if you want to ke
 
 A setup can hold an optional event/layout and driver default. Choose an active event/layout on the setup before adding a lap. New laps copy the setup’s event/layout and driver into their saved history; later setup changes apply to future laps only. Historical laps show their saved event/layout and driver as context.
 
-The setup editor keeps the freeform Settings and Notes fields and adds optional structured inputs in tabs. Blank vehicle values stay unset. Spring rates use lb/in, damping ratios are dimensionless, differential ramp angle uses degrees, differential preload uses ft-lb, camber and toe use degrees, tire pressure uses PSI, and corner weight uses lb. Sprocket size is free text with no assumed unit. The dropdown guidance identifies the front-wing height order, rear-wing downforce order, and rear anti-roll-bar blade and motion-ratio order.
+The setup editor keeps the freeform Settings and Notes fields and adds optional structured inputs in tabs. Blank vehicle values stay unset. Spring rates use lb/in, damping ratios are dimensionless, differential ramp angle uses degrees, differential preload uses ft-lb, camber and toe use degrees, tire pressure uses PSI, and corner weight uses lb. Sprocket size is num teeth. The dropdown guidance identifies the front-wing height order, rear-wing downforce order, and rear anti-roll-bar blade and motion-ratio order.
 
 Lap time is the only required lap entry. New laps start as valid; invalid remains selectable. Time of day, notes, and file attachments are optional. The CSV export keeps its existing columns and order.
 ## CSV columns
@@ -79,10 +69,3 @@ The recipient opens the data folder that will hold the combined log, chooses **S
 Record IDs distinguish sessions. Separate test days that happen to use the same date and location stay separate; the app does not automatically coalesce them. Imports only add or skip records and files. Deletions from one person's log do not propagate to another person's log. There is no server, account, or automatic sync, and users should not edit the same live data folder at the same time.
 
 To exchange a log created by an older version, open that data folder with the updated app, save any pending edits, and export a package from the **Sharing** menu.
-
-## Tests
-
-Run the complete test suite from the project folder. Tests use temporary data folders.
-
-    Set-Location 'C:\VD Tools\test_log'
-    & 'C:\Users\johny\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest discover -s tests -v
