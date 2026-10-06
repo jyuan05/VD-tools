@@ -9,6 +9,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .models import EventLayout, StagedAttachment, new_id, utc_now_iso
+from .platform_open import open_path
 from .validation import ValidationError
 
 
@@ -455,10 +456,7 @@ class EventLayoutManager(tk.Toplevel):
         attachment = self._attachments[index]
         try:
             path = self.services.resolve_attachment(attachment)
-            opener = getattr(os, "startfile", None)
-            if opener is None:
-                raise OSError("Opening files is available on Windows.")
-            opener(str(path))
+            open_path(path)
         except Exception as error:
             self._set_status(f"Could not open map: {error}")
             messagebox.showerror("Open map", str(error), parent=self)

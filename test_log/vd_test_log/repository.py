@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -744,6 +745,216 @@ class SQLiteRepository:
                     "attachments",
                     "An attachment could not be saved for this record.",
                 ) from error
+
+    def apply_import_batch(
+        self,
+        *,
+        days: Sequence[TestDay] = (),
+        setups: Sequence[Setup] = (),
+        laps: Sequence[Lap] = (),
+        event_layouts: Sequence[EventLayout] = (),
+        attachments: Sequence[Attachment] = (),
+    ) -> None:
+        """Insert a validated package batch without replacing saved rows.
+
+        Unlike the ordinary save methods, this operation preserves package IDs
+        and never commits a partial record or attachment set.
+        """
+        imported_days = tuple(days)
+        imported_setups = tuple(setups)
+        imported_laps = tuple(laps)
+        imported_events = tuple(event_layouts)
+        imported_attachments = tuple(attachments)
+
+        for records, kind in (
+            (imported_days, "day"),
+            (imported_setups, "setup"),
+            (imported_laps, "lap"),
+            (imported_events, "event/layout"),
+            (imported_attachments, "attachment"),
+        ):
+            identifiers = [record.id for record in records]
+            if len(set(identifiers)) != len(identifiers):
+                raise ValidationError("import", f"The package contains duplicate {kind} IDs.")
+
+        for record in imported_days:
+            validate_day(record)
+        for record in imported_events:
+            validate_event_layout(record)
+        for record in imported_setups:
+            validate_setup(record)
+        for record in imported_laps:
+            validate_lap(record)
+        for attachment in imported_attachments:
+            if attachment.owner_type not in _OWNER_COLUMNS:
+                raise ValidationError("owner_type", "Choose a supported attachment owner.")
+            if not isinstance(attachment.id, str) or not attachment.id.strip():
+                raise ValidationError("attachments", "An imported attachment requires an ID.")
+            if not isinstance(attachment.owner_id, str) or not attachment.owner_id.strip():
+                raise ValidationError("attachments", "An imported attachment requires an owner.")
+            validate_staged_attachment(
+                StagedAttachment(
+                    role=attachment.role,
+                    original_name=attachment.original_name,
+                    relative_path=attachment.relative_path,
+                ),
+                attachment.owner_type,
+            )
+            try:
+                timestamp = datetime.fromisoformat(attachment.created_at)
+            except (TypeError, ValueError) as error:
+                raise ValidationError(
+                    "created_at", "Use a timezone-aware ISO 8601 timestamp."
+                ) from error
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValidationError("created_at", "Use a timezone-aware ISO 8601 timestamp.")
+
+        connection = self._connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            # Insert event definitions before setup/lap references. Event files
+            # follow immediately so the database's history trigger can still
+            # reject additions to an event already referenced centrally.
+            for record in imported_events:
+                connection.execute(
+                    """
+                    INSERT INTO event_layouts(
+                        id, track_name, layout_name, event_name, event_type,
+                        length_m, notes, archived, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.id,
+                        record.track_name,
+                        record.layout_name,
+                        record.event_name,
+                        record.event_type,
+                        record.length_m,
+                        record.notes,
+                        int(record.archived),
+                        record.created_at,
+                    ),
+                )
+            for record in imported_days:
+                connection.execute(
+                    """
+                    INSERT INTO test_days(id, date, location, weather, notes, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.id,
+                        record.date,
+                        record.location,
+                        record.weather,
+                        record.notes,
+                        record.created_at,
+                    ),
+                )
+
+            for owner_type in ("event_layout", "day"):
+                self._insert_import_attachments(imported_attachments, owner_type)
+
+            for record in imported_setups:
+                saved = replace(
+                    record,
+                    event_layout_id=(
+                        record.event_layout_id
+                        if record.event_layout_id is not None and record.event_layout_id.strip()
+                        else None
+                    ),
+                    order=self._next_import_order("setups", "test_day_id", record.test_day_id),
+                )
+                validate_setup(saved)
+                connection.execute(
+                    """
+                    INSERT INTO setups(
+                        id, test_day_id, name, setup_code, settings_text, notes,
+                        event_layout_id, driver, structured_settings_json,
+                        sort_order, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        saved.id,
+                        saved.test_day_id,
+                        saved.name,
+                        saved.setup_code,
+                        saved.settings_text,
+                        saved.notes,
+                        saved.event_layout_id,
+                        saved.driver,
+                        saved.structured_settings_json,
+                        saved.order,
+                        saved.created_at,
+                    ),
+                )
+            self._insert_import_attachments(imported_attachments, "setup")
+
+            for record in imported_laps:
+                saved = replace(
+                    record,
+                    sequence=self._next_import_order("laps", "setup_id", record.setup_id),
+                )
+                validate_lap(saved)
+                connection.execute(
+                    """
+                    INSERT INTO laps(
+                        id, setup_id, event_layout_id, sequence, time_ms, status,
+                        driver, time_of_day, notes, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        saved.id,
+                        saved.setup_id,
+                        saved.event_layout_id,
+                        saved.sequence,
+                        saved.time_ms,
+                        saved.status,
+                        saved.driver,
+                        saved.time_of_day,
+                        saved.notes,
+                        saved.created_at,
+                    ),
+                )
+            self._insert_import_attachments(imported_attachments, "lap")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+    def _next_import_order(self, table: str, owner_column: str, owner_id: str) -> int:
+        if (table, owner_column) not in (("setups", "test_day_id"), ("laps", "setup_id")):
+            raise ValueError("Unsupported imported child order.")
+        order_column = "sort_order" if table == "setups" else "sequence"
+        row = self._connection.execute(
+            f"SELECT COALESCE(MAX({order_column}), 0) + 1 FROM {table} WHERE {owner_column} = ?",
+            (owner_id,),
+        ).fetchone()
+        return int(row[0])
+
+    def _insert_import_attachments(
+        self, attachments: Sequence[Attachment], owner_type: str
+    ) -> None:
+        owner_column = _OWNER_COLUMNS[owner_type]
+        for attachment in attachments:
+            if attachment.owner_type != owner_type:
+                continue
+            self._connection.execute(
+                f"""
+                INSERT INTO attachments(
+                    id, owner_type, {owner_column}, role, original_name,
+                    relative_path, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attachment.id,
+                    owner_type,
+                    attachment.owner_id,
+                    attachment.role,
+                    attachment.original_name,
+                    attachment.relative_path,
+                    attachment.created_at,
+                ),
+            )
 
     def save_event_layout(
         self,

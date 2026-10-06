@@ -11,6 +11,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from .event_ui import EventLayoutManager
 from .models import EventLayout, Lap, Setup, StagedAttachment, TestDay, new_id, utc_now_iso
+from .platform_open import open_path
+from .sharing_ui import SharingUI
 from .setup_settings import (
     CORNERS,
     CORNER_FIELDS,
@@ -70,6 +72,8 @@ class TestLogWindow:
         self.status_label: ttk.Label | None = None
         self.dirty_label: ttk.Label | None = None
         self.event_manager: EventLayoutManager | None = None
+        self.sharing_ui: SharingUI | None = None
+        self.menu_bar: tk.Menu | None = None
         self._editor_frame: ttk.Frame | None = None
         self.setup_notebook: ttk.Notebook | None = None
         self.lap_context_label: ttk.Label | None = None
@@ -102,6 +106,8 @@ class TestLogWindow:
         self.root.geometry("1180x720")
         self.root.minsize(900, 630)
         self.root.protocol("WM_DELETE_WINDOW", self.close_request)
+        self.sharing_ui = SharingUI(self)
+        self.menu_bar = self.sharing_ui.install_menu()
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=1)
 
@@ -1035,10 +1041,7 @@ class TestLogWindow:
 
     def open_data_folder(self) -> None:
         try:
-            opener = getattr(os, "startfile", None)
-            if opener is None:
-                raise OSError("Opening folders is available on Windows.")
-            opener(str(self.services.paths.root))
+            open_path(self.services.paths.root)
         except Exception as error:
             self._set_status(f"Could not open data folder: {error}")
             messagebox.showerror("Open data folder", str(error), parent=self.root)
@@ -1054,10 +1057,7 @@ class TestLogWindow:
             return
         try:
             path = self.services.resolve_attachment(attachment)
-            opener = getattr(os, "startfile", None)
-            if opener is None:
-                raise OSError("Opening files is available on Windows.")
-            opener(str(path))
+            open_path(path)
         except Exception as error:
             self._set_status(f"Could not open attachment: {error}")
             messagebox.showerror("Open attachment", str(error), parent=self.root)

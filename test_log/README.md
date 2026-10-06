@@ -16,6 +16,13 @@ A relative -DataDir is resolved against the directory from which the launcher wa
 
 The launcher checks py -3.12, then python, then the bundled Codex Python runtime. It accepts the first Python 3.12+ interpreter that imports sqlite3 and can create, withdraw, update, and destroy a real Tk window. Install no dependencies; if no candidate works, install or repair Python 3.12+ with Tcl/Tk enabled.
 
+On macOS or Linux, run the portable shell launcher from any working directory:
+
+    sh '/path/to/test_log/launch.sh' --data-dir "$HOME/Vehicle Test Data"
+    sh '/path/to/test_log/launch.sh' --help
+
+The shell launcher loads the app from its own folder, preserves your current working directory (so a relative `--data-dir` is resolved from there), forwards its arguments to `python3 -m vd_test_log`, and checks for Python 3.12+ with Tkinter and sqlite3. You can also start the app directly with `python3 -m vd_test_log` from this folder. The app uses `~/VDTestLog` by default on macOS and Linux. The launcher is invoked through `sh`, so it does not depend on an executable file permission.
+
 For direct module use, run from this folder with a compatible interpreter:
 
     python -m vd_test_log
@@ -58,6 +65,16 @@ A setup export uses these columns, in order:
 Lap times use m:ss.sss formatting. Valid and invalid laps are included.
 
 To carry a saved setup to another test day, open the setup and choose Copy to another day. The copy keeps its setup label, Setup ID, settings, driver and event defaults, with independent copies of its attachments; laps stay with the original setup.
+
+## Exchange logs between users
+
+Each person should keep their own data folder. To send saved records to another person, choose **Sharing > Export Log Package…** and save the ZIP package. The source label is optional and helps identify who sent it. A package contains saved test days, setups, laps, event/layout definitions and their history, plus copied attachments and map files.
+
+The recipient opens the data folder that will hold the combined log, chooses **Sharing > Import Log Package…**, and selects the ZIP. The preview shows the source label, incoming records, records that will be added or skipped, and any conflicts. A conflict blocks a merge so existing records are not overwritten. The recipient can choose **Import as a separate snapshot** to add a remapped copy of the incoming log; a changed log may duplicate previously imported history. Re-importing an unchanged package is safe and skips records already present.
+
+Record IDs distinguish sessions. Separate test days that happen to use the same date and location stay separate; the app does not automatically coalesce them. Imports only add or skip records and files. Deletions from one person's log do not propagate to another person's log. There is no server, account, or automatic sync, and users should not edit the same live data folder at the same time.
+
+To exchange a log created by an older version, open that data folder with the updated app, save any pending edits, and export a package from the **Sharing** menu.
 
 ## Tests
 

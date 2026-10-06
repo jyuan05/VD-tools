@@ -26,11 +26,30 @@ from .models import (
     utc_now_iso,
 )
 from .repository import SQLiteRepository
+from .share_merge import (
+    apply_import_plan,
+    plan_import,
+    preview_from_plan,
+    raise_plan_conflicts,
+)
+from .share_package import (
+    ImportResult,
+    ImportPreview,
+    PackageChangedError,
+    PackageError,
+    capture_log,
+    read_package,
+    write_package,
+)
 from .validation import ValidationError
 
 
 class UnsafeCsvDestinationError(ValueError):
     """A CSV export would overwrite data owned by the test log."""
+
+
+class UnsafeSharePackageDestinationError(PackageError):
+    """A package export would replace a file owned by the test log."""
 
 
 def _resolved_path(path: Path) -> Path:
@@ -77,6 +96,54 @@ def _guard_csv_destination(paths: DataPaths, destination: Path) -> None:
             raise UnsafeCsvDestinationError(
                 "Choose a CSV destination outside the test log attachments and backup folders."
             )
+
+
+def _guard_share_package_destination(paths: DataPaths, destination: Path) -> None:
+    resolved_destination = _resolved_path(destination)
+    database = Path(paths.database)
+    protected_files = (
+        database,
+        Path(f"{database}-wal"),
+        Path(f"{database}-shm"),
+        Path(f"{database}-journal"),
+        Path(paths.lock_file),
+    )
+    for protected_file in protected_files:
+        resolved_protected = _resolved_path(protected_file)
+        if resolved_destination == resolved_protected or _same_existing_file(
+            resolved_destination, resolved_protected
+        ):
+            raise UnsafeSharePackageDestinationError(
+                "Choose a package destination outside the test log database, sidecars, and lock file."
+            )
+
+    protected_directories = (Path(paths.attachments), Path(paths.backup_root))
+    for protected_directory in protected_directories:
+        resolved_directory = _resolved_path(protected_directory)
+        if _is_within(resolved_destination, resolved_directory):
+            raise UnsafeSharePackageDestinationError(
+                "Choose a package destination outside the test log attachments and backup folders."
+            )
+
+    # Path.resolve catches symlink and junction aliases. Also catch an existing
+    # hard link to any file in the managed trees before an atomic replacement.
+    if resolved_destination.exists():
+        for protected_directory in protected_directories:
+            if not protected_directory.exists():
+                continue
+            try:
+                entries = protected_directory.rglob("*")
+                for protected_file in entries:
+                    if protected_file.is_file() and _same_existing_file(
+                        resolved_destination, protected_file
+                    ):
+                        raise UnsafeSharePackageDestinationError(
+                            "Choose a package destination that is not an alias of a managed attachment or backup."
+                        )
+            except OSError as error:
+                raise UnsafeSharePackageDestinationError(
+                    "The package destination could not be checked against managed files."
+                ) from error
 
 
 class BackupInProgressError(RuntimeError):
@@ -464,3 +531,94 @@ class TestLogServices:
         self._ensure_open()
         _guard_csv_destination(self.paths, destination)
         return write_setup_csv(self._repository, setup_id, destination)
+
+    def export_share_package(
+        self, destination: Path, source_label: str = ""
+    ) -> Path:
+        self._ensure_open()
+        destination = Path(destination)
+        _guard_share_package_destination(self.paths, destination)
+        with self._mutation():
+            return write_package(
+                destination,
+                capture_log(self._repository),
+                self._attachments,
+                source_label,
+                guard_destination=lambda path: _guard_share_package_destination(
+                    self.paths, path
+                ),
+            )
+
+    def preview_share_package(
+        self, source: Path, *, separate_copy: bool = False
+    ) -> ImportPreview:
+        self._ensure_open()
+        package = read_package(Path(source))
+        with self._mutation():
+            plan = plan_import(
+                self._repository,
+                self._attachments,
+                package,
+                separate_copy=separate_copy,
+            )
+        return preview_from_plan(package, plan, separate_copy=separate_copy)
+
+    def import_share_package(
+        self,
+        source: Path,
+        *,
+        separate_copy: bool = False,
+        expected_fingerprint: str | None = None,
+    ) -> ImportResult:
+        self._ensure_open()
+        package = read_package(Path(source))
+        if (
+            expected_fingerprint is not None
+            and package.fingerprint != expected_fingerprint
+        ):
+            raise PackageChangedError(
+                "The package changed since preview. Review a fresh import preview before importing it."
+            )
+
+        with self._mutation():
+            plan = plan_import(
+                self._repository,
+                self._attachments,
+                package,
+                separate_copy=separate_copy,
+            )
+            raise_plan_conflicts(plan)
+            if not any(
+                (
+                    plan.added.days,
+                    plan.added.setups,
+                    plan.added.laps,
+                    plan.added.event_layouts,
+                    plan.added.attachments,
+                )
+            ):
+                return ImportResult(
+                    source_label=package.source_label,
+                    fingerprint=package.fingerprint,
+                    added=plan.added,
+                    skipped=plan.skipped,
+                    backup_path=None,
+                )
+
+            backup_path = self._backup_manager.create_backup(
+                self._repository._connection,
+                self._attachments,
+            )
+            apply_import_plan(
+                self._repository,
+                self._attachments,
+                package,
+                plan,
+            )
+            return ImportResult(
+                source_label=package.source_label,
+                fingerprint=package.fingerprint,
+                added=plan.added,
+                skipped=plan.skipped,
+                backup_path=backup_path,
+            )
