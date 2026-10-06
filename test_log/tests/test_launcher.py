@@ -83,6 +83,7 @@ class PortableLauncherTests(unittest.TestCase):
                 encoding="utf-8",
                 newline="\n",
             )
+            fake_python.chmod(0o755)
             foreign_folder = root / "different working folder"
             foreign_folder.mkdir()
             environment = os.environ.copy()
@@ -143,6 +144,7 @@ class PortableLauncherTests(unittest.TestCase):
                 encoding="utf-8",
                 newline="\n",
             )
+            fake_python.chmod(0o755)
             foreign_folder = root / "different working folder"
             foreign_folder.mkdir()
             environment = os.environ.copy()
@@ -194,11 +196,13 @@ class PortableLauncherTests(unittest.TestCase):
             fake_bin = root / "fake python bin"
             fake_bin.mkdir()
             for candidate in ("python3.12", "python3"):
-                (fake_bin / candidate).write_text(
+                fake_python = fake_bin / candidate
+                fake_python.write_text(
                     "#!/bin/sh\nexit 1\n",
                     encoding="utf-8",
                     newline="\n",
                 )
+                fake_python.chmod(0o755)
             environment = os.environ.copy()
             environment["PATH"] = str(fake_bin) + os.pathsep + environment.get("PATH", "")
 
