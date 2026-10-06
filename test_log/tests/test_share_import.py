@@ -4,6 +4,8 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from zipfile import ZipFile
 
 from vd_test_log.models import (
     DataPaths,
@@ -374,6 +376,75 @@ class SharePackageImportTests(unittest.TestCase):
                 separate_copy=True,
                 expected_fingerprint=edited_preview.fingerprint,
             )
+
+    def test_spooled_imports_preserve_safe_suffixes_for_all_owners_and_ids(self):
+        source, expected = self.create_complete_source()
+        malicious_id = "../../../../outside"
+        original_day_attachment = source.list_attachments("day", expected["day"].id)[0]
+        source._repository._connection.execute(
+            "UPDATE attachments SET id = ? WHERE id = ?",
+            (malicious_id, original_day_attachment.id),
+        )
+        source._repository._connection.commit()
+        package_path = self.root / "odd-attachment-id.zip"
+        source.export_share_package(package_path)
+
+        spool_parent = self.root / "isolated-spool-parent"
+        spool_parent.mkdir()
+        escaped_spool_file = self.root / "outside.blob"
+        with patch.object(tempfile, "tempdir", str(spool_parent)):
+            self.central.import_share_package(package_path)
+            self.assertFalse(escaped_spool_file.exists())
+
+            self.central.import_share_package(package_path, separate_copy=True)
+
+        self.assertEqual(
+            self.central.list_attachments("day", expected["day"].id)[0].id,
+            malicious_id,
+        )
+        all_attachments = tuple(
+            attachment
+            for service in (self.central,)
+            for owner_type, owners in (
+                ("day", service.list_days()),
+                ("setup", tuple(
+                    setup
+                    for day in service.list_days()
+                    for setup in service.list_setups(day.id)
+                )),
+                ("lap", tuple(
+                    lap
+                    for day in service.list_days()
+                    for setup in service.list_setups(day.id)
+                    for lap in service.list_laps(setup.id)
+                )),
+                ("event_layout", service.list_event_layouts(include_archived=True)),
+            )
+            for owner in owners
+            for attachment in service.list_attachments(owner_type, owner.id)
+        )
+        self.assertEqual(len(all_attachments), 8)
+        self.assertEqual(
+            {attachment.owner_type for attachment in all_attachments},
+            {"day", "setup", "lap", "event_layout"},
+        )
+        for attachment in all_attachments:
+            self.assertEqual(
+                Path(attachment.relative_path).suffix,
+                Path(attachment.original_name).suffix,
+                attachment.original_name,
+            )
+
+    def test_import_reuses_one_zip_reader_for_all_attachment_blobs(self):
+        source, _ = self.create_complete_source()
+        package_path = self.root / "single-reader.zip"
+        source.export_share_package(package_path)
+
+        with patch("vd_test_log.share_package.ZipFile", wraps=ZipFile) as zip_factory:
+            result = self.central.import_share_package(package_path)
+
+        self.assertEqual(result.added.attachments, 4)
+        self.assertEqual(zip_factory.call_count, 2)
 
     def test_new_map_on_already_referenced_event_is_a_preview_conflict(self):
         source = self.open_services("event-source")

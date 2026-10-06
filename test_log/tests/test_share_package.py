@@ -20,6 +20,7 @@ from vd_test_log.models import (
     TestDay,
 )
 from vd_test_log.repository import SQLiteRepository
+from vd_test_log import share_package
 from vd_test_log.share_package import (
     PackageError,
     LogSnapshot,
@@ -465,6 +466,44 @@ class SharePackageTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_blob_reader_opens_archive_and_indexes_attachments_once_per_batch(self):
+        source = self.root / "batch.zip"
+        write_package(source, self.make_snapshot(), self.store)
+        package = read_package(source)
+        items = tuple(package.attachments)
+        counting_attachments = _CountingSequence(items)
+        package = dataclasses.replace(package, attachments=counting_attachments)
+        reader_type = getattr(share_package, "PackageBlobReader", None)
+        self.assertIsNotNone(reader_type, "a batch blob reader is required for imports")
+
+        real_zip = share_package.ZipFile
+        opened = []
+
+        def tracking_zip(*args, **kwargs):
+            archive = real_zip(*args, **kwargs)
+            opened.append(archive)
+            return archive
+
+        with patch.object(share_package, "ZipFile", side_effect=tracking_zip):
+            with reader_type(package) as reader:
+                for index, item in enumerate(items):
+                    reader.copy(item, self.root / f"batch-copy-{index}.bin")
+
+        self.assertEqual(len(opened), 1)
+        self.assertIsNone(opened[0].fp)
+        self.assertEqual(counting_attachments.iterations, 1)
+        expected_content = {
+            "attachment-1": b"day bytes",
+            "attachment-2": b"setup bytes",
+            "attachment-3": b"lap bytes",
+            "attachment-4": b"map bytes",
+        }
+        for index, item in enumerate(items):
+            self.assertEqual(
+                (self.root / f"batch-copy-{index}.bin").read_bytes(),
+                expected_content[item.record.id],
+            )
+
     def test_actual_streamed_attachment_limit_is_enforced(self):
         valid = self.root / "valid.zip"
         write_package(valid, self.make_snapshot(), self.store)
@@ -493,6 +532,22 @@ class SharePackageTests(unittest.TestCase):
                     item,
                     content if item.filename == member else original.read(item.filename),
                 )
+
+
+class _CountingSequence:
+    def __init__(self, items):
+        self._items = tuple(items)
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
+
+    def __getitem__(self, index):
+        return self._items[index]
 
 
 if __name__ == "__main__":

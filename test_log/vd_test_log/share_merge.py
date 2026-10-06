@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid5
 
 from .attachments import AttachmentStore
-from .models import Attachment, EventLayout, Lap, Setup, StagedAttachment, TestDay
+from .models import Attachment, EventLayout, Lap, Setup, StagedAttachment, TestDay, new_id
 from .repository import SQLiteRepository
 from .share_package import (
     ImportPreview,
@@ -19,7 +20,7 @@ from .share_package import (
     PackageConflict,
     PackageConflictError,
     PackageCounts,
-    copy_package_attachment,
+    PackageBlobReader,
     capture_log,
     semantic_record,
 )
@@ -139,6 +140,11 @@ def _attachment_digest(store: AttachmentStore, record: Attachment) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _safe_spool_suffix(original_name: str) -> str:
+    suffix = Path(original_name).suffix
+    return suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,16}", suffix) else ""
 
 
 def _make_conflict(kind: str, record_id: str, description: str) -> PackageConflict:
@@ -321,20 +327,23 @@ def apply_import_plan(
     imported_attachments: list[Attachment] = []
     package_items_by_member = {item.member: item for item in package.attachments}
     try:
-        with tempfile.TemporaryDirectory(prefix="vd-test-log-import-") as temporary:
-            temporary_root = Path(temporary)
-            for index, item in enumerate(plan.attachments):
-                spool_path = temporary_root / f"{index:08d}-{item.record.id}.blob"
-                source_item = package_items_by_member.get(item.member)
-                if source_item is None:
-                    raise ValueError("An import attachment is not present in the loaded package.")
-                copy_package_attachment(package, source_item, spool_path)
-                copied = store.stage(spool_path, item.record.role)
-                copied = replace(copied, original_name=item.record.original_name)
-                staged.append(copied)
-                imported_attachments.append(
-                    replace(item.record, relative_path=copied.relative_path)
-                )
+        with PackageBlobReader(package) as blob_reader:
+            with tempfile.TemporaryDirectory(prefix="vd-test-log-import-") as temporary:
+                temporary_root = Path(temporary)
+                for index, item in enumerate(plan.attachments):
+                    spool_path = temporary_root / (
+                        f"{index:08d}-{new_id()}{_safe_spool_suffix(item.record.original_name)}"
+                    )
+                    source_item = package_items_by_member.get(item.member)
+                    if source_item is None:
+                        raise ValueError("An import attachment is not present in the loaded package.")
+                    blob_reader.copy(source_item, spool_path)
+                    copied = store.stage(spool_path, item.record.role)
+                    copied = replace(copied, original_name=item.record.original_name)
+                    staged.append(copied)
+                    imported_attachments.append(
+                        replace(item.record, relative_path=copied.relative_path)
+                    )
         repository.apply_import_batch(
             days=plan.days,
             setups=plan.setups,

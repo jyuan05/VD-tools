@@ -371,42 +371,138 @@ def copy_package_attachment(
     package: LoadedPackage, item: PackageAttachment, destination: Path
 ) -> None:
     """Stream one validated blob into a caller-chosen generated path."""
-    if item not in package.attachments:
-        raise PackageError("The requested attachment is not part of this package.")
-    expected_index = package.attachments.index(item)
-    if item.member != _blob_member(expected_index):
-        raise PackageError("The package attachment does not have a generated member name.")
-    if item.size > MAX_ATTACHMENT_BYTES:
-        raise PackageError(f"An attachment exceeds the {MAX_ATTACHMENT_BYTES}-byte limit.")
+    with PackageBlobReader(package) as reader:
+        reader.copy(item, destination)
 
-    target = Path(destination)
-    created_destination = False
-    try:
-        with ZipFile(package.source, "r") as archive:
-            info = archive.getinfo(item.member)
-            _validate_zip_info(info)
-            if info.file_size != item.size:
-                raise PackageError(f"Attachment {item.record.id} has an inconsistent declared size.")
+
+class PackageBlobReader:
+    """Keep one validated ZIP index open while copying a package's blobs."""
+
+    def __init__(self, package: LoadedPackage):
+        self._package = package
+        self._archive: ZipFile | None = None
+        self._members: dict[PackageAttachment, ZipInfo] = {}
+        self._copied_total = 0
+
+    def __enter__(self) -> PackageBlobReader:
+        if self._archive is not None:
+            raise PackageError("This package blob reader is already open.")
+        archive: ZipFile | None = None
+        try:
+            archive = ZipFile(self._package.source, "r")
+            infos = archive.infolist()
+            if len(infos) > MAX_MEMBER_COUNT:
+                raise PackageError("The package contains too many archive members.")
+            info_by_name: dict[str, ZipInfo] = {}
+            for info in infos:
+                _validate_zip_info(info)
+                if info.filename in info_by_name:
+                    raise PackageError(f"The package contains a duplicate member: {info.filename}")
+                info_by_name[info.filename] = info
+            if "manifest.json" not in info_by_name:
+                raise PackageError("The package is missing its manifest.json file.")
+
+            members: dict[PackageAttachment, ZipInfo] = {}
+            expected_names = {"manifest.json"}
+            declared_total = 0
+            for index, item in enumerate(self._package.attachments):
+                if not isinstance(item, PackageAttachment):
+                    raise PackageError("The package contains invalid attachment metadata.")
+                if item.member != _blob_member(index):
+                    raise PackageError("The package uses an invalid or non-generated blob member name.")
+                if (
+                    isinstance(item.size, bool)
+                    or not isinstance(item.size, int)
+                    or item.size < 0
+                    or item.size > MAX_ATTACHMENT_BYTES
+                ):
+                    raise PackageError("A package attachment has an invalid or excessive size.")
+                if not isinstance(item.sha256, str) or re.fullmatch(r"[0-9a-f]{64}", item.sha256) is None:
+                    raise PackageError("A package attachment has an invalid SHA-256 value.")
+                if item.member in expected_names:
+                    raise PackageError("The package contains duplicate attachment members.")
+                info = info_by_name.get(item.member)
+                if info is None:
+                    raise PackageError(f"The package is missing attachment member {item.member!r}.")
+                if info.file_size != item.size:
+                    raise PackageError(f"Attachment {item.record.id} has an inconsistent declared size.")
+                try:
+                    if item in members:
+                        raise PackageError("The package contains duplicate attachment metadata.")
+                    members[item] = info
+                except TypeError as error:
+                    raise PackageError("The package contains invalid attachment metadata.") from error
+                expected_names.add(item.member)
+                declared_total += item.size
+                if declared_total > MAX_TOTAL_ATTACHMENT_BYTES:
+                    raise PackageError("The package attachments exceed the total size limit.")
+            if set(info_by_name) != expected_names:
+                unexpected = sorted(set(info_by_name) - expected_names)
+                missing = sorted(expected_names - set(info_by_name))
+                if unexpected:
+                    raise PackageError(f"The package contains an unknown archive member: {unexpected[0]}")
+                raise PackageError(f"The package is missing archive member: {missing[0]}")
+            if len(info_by_name) != len(members) + 1:
+                raise PackageError("The package has an invalid number of archive members.")
+            self._archive = archive
+            self._members = members
+            self._copied_total = 0
+            return self
+        except PackageError:
+            if archive is not None:
+                archive.close()
+            raise
+        except (BadZipFile, OSError, RuntimeError, EOFError, ValueError, TypeError) as error:
+            if archive is not None:
+                archive.close()
+            raise PackageError(f"Could not open package attachment data: {error}") from error
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        archive = self._archive
+        self._archive = None
+        self._members = {}
+        self._copied_total = 0
+        if archive is not None:
+            archive.close()
+        return False
+
+    def copy(self, item: PackageAttachment, destination: Path) -> None:
+        """Copy one member with bounded streaming and post-read integrity checks."""
+        archive = self._archive
+        if archive is None:
+            raise PackageError("Open the package blob reader before copying an attachment.")
+        try:
+            info = self._members.get(item)
+        except (TypeError, AttributeError) as error:
+            raise PackageError("The requested attachment is not part of this package.") from error
+        if info is None:
+            raise PackageError("The requested attachment is not part of this package.")
+
+        target = Path(destination)
+        created_destination = False
+        try:
             with archive.open(info, "r") as source_stream:
                 with target.open("xb") as destination_stream:
                     created_destination = True
                     size, digest = _copy_and_hash(
                         source_stream,
                         destination_stream,
-                        max_bytes=min(MAX_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES),
+                        max_bytes=MAX_ATTACHMENT_BYTES,
+                        total_remaining=MAX_TOTAL_ATTACHMENT_BYTES - self._copied_total,
                     )
             if size != item.size:
                 raise PackageError(f"Attachment {item.record.id} has an invalid size.")
             if digest != item.sha256:
                 raise PackageError(f"Attachment {item.record.id} failed its SHA-256 check.")
-    except PackageError:
-        if created_destination:
-            target.unlink(missing_ok=True)
-        raise
-    except (BadZipFile, OSError, RuntimeError, EOFError, ValueError, zlib.error) as error:
-        if created_destination:
-            target.unlink(missing_ok=True)
-        raise PackageError(f"Could not copy package attachment: {error}") from error
+            self._copied_total += size
+        except PackageError:
+            if created_destination:
+                target.unlink(missing_ok=True)
+            raise
+        except (BadZipFile, OSError, RuntimeError, EOFError, ValueError, zlib.error) as error:
+            if created_destination:
+                target.unlink(missing_ok=True)
+            raise PackageError(f"Could not copy package attachment: {error}") from error
 
 
 def semantic_record(
