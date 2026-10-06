@@ -355,4 +355,3 @@ def apply_import_plan(
 def raise_plan_conflicts(plan: ImportPlan) -> None:
     if plan.conflicts:
         _raise_conflicts(plan.conflicts)
-
