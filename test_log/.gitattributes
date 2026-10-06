@@ -1,1 +1,2 @@
 launch.sh text eol=lf
+launch.command text eol=lf
