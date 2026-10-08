@@ -25,6 +25,7 @@ from .models import (
     new_id,
     utc_now_iso,
 )
+from .parquet_export import write_parquet_dataset
 from .repository import SQLiteRepository
 from .share_merge import (
     apply_import_plan,
@@ -50,6 +51,10 @@ class UnsafeCsvDestinationError(ValueError):
 
 class UnsafeSharePackageDestinationError(PackageError):
     """A package export would replace a file owned by the test log."""
+
+
+class UnsafeParquetDatasetDestinationError(ValueError):
+    """A Parquet dataset would be created in or alias test-log-owned data."""
 
 
 def _resolved_path(path: Path) -> Path:
@@ -143,6 +148,54 @@ def _guard_share_package_destination(paths: DataPaths, destination: Path) -> Non
             except OSError as error:
                 raise UnsafeSharePackageDestinationError(
                     "The package destination could not be checked against managed files."
+                ) from error
+
+
+def _guard_parquet_dataset_destination(paths: DataPaths, destination: Path) -> None:
+    destination = Path(destination)
+    resolved_destination = _resolved_path(destination)
+    database = Path(paths.database)
+    protected_files = (
+        database,
+        Path(f"{database}-wal"),
+        Path(f"{database}-shm"),
+        Path(f"{database}-journal"),
+        Path(paths.lock_file),
+    )
+    for protected_file in protected_files:
+        resolved_protected = _resolved_path(protected_file)
+        if resolved_destination == resolved_protected or _same_existing_file(
+            destination, protected_file
+        ):
+            raise UnsafeParquetDatasetDestinationError(
+                "Choose a Parquet dataset destination outside the test log database, sidecars, and lock file."
+            )
+
+    protected_directories = (Path(paths.attachments), Path(paths.backup_root))
+    for protected_directory in protected_directories:
+        resolved_directory = _resolved_path(protected_directory)
+        if _is_within(resolved_destination, resolved_directory):
+            raise UnsafeParquetDatasetDestinationError(
+                "Choose a Parquet dataset destination outside the test log attachments and backup folders."
+            )
+
+    # Path.resolve catches directory and symlink aliases. Existing files also
+    # need samefile checks because hard links do not change the resolved path.
+    if os.path.lexists(os.fspath(destination)):
+        for protected_directory in protected_directories:
+            if not protected_directory.exists():
+                continue
+            try:
+                for protected_file in protected_directory.rglob("*"):
+                    if protected_file.is_file() and _same_existing_file(
+                        destination, protected_file
+                    ):
+                        raise UnsafeParquetDatasetDestinationError(
+                            "Choose a Parquet dataset destination that is not an alias of a managed attachment or backup."
+                        )
+            except OSError as error:
+                raise UnsafeParquetDatasetDestinationError(
+                    "The Parquet destination could not be checked against managed files."
                 ) from error
 
 
@@ -422,7 +475,7 @@ class TestLogServices:
         with self._mutation():
             original = self._repository.get_setup(setup_id)
             if original is None:
-                raise ValidationError("setup_id", "The setup no longer exists.")
+                raise ValidationError("setup_id", "The outing no longer exists.")
             destination = self._repository.get_day(destination_day_id)
             if destination is None:
                 raise ValidationError("destination_day_id", "Select an existing destination test day.")
@@ -455,7 +508,7 @@ class TestLogServices:
         with self._mutation():
             original = self._repository.get_setup(identifier)
             if original is None:
-                raise ValidationError("setup_id", "The setup no longer exists.")
+                raise ValidationError("setup_id", "The outing no longer exists.")
             copied_attachments: list[StagedAttachment] = []
             try:
                 for attachment in self._repository.list_attachments("setup", identifier):
@@ -531,6 +584,20 @@ class TestLogServices:
         self._ensure_open()
         _guard_csv_destination(self.paths, destination)
         return write_setup_csv(self._repository, setup_id, destination)
+
+    def export_parquet(self, destination: Path) -> Path:
+        self._ensure_open()
+        destination = Path(destination)
+        _guard_parquet_dataset_destination(self.paths, destination)
+        with self._mutation():
+            snapshot = self._repository.capture_parquet_snapshot()
+        return write_parquet_dataset(
+            snapshot,
+            destination,
+            guard_destination=lambda path: _guard_parquet_dataset_destination(
+                self.paths, path
+            ),
+        )
 
     def export_share_package(
         self, destination: Path, source_label: str = ""

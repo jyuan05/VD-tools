@@ -1,4 +1,4 @@
-"""Optional setup-level vehicle inputs with stable JSON field names."""
+"""Optional outing-level vehicle inputs with stable JSON field names."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ NUMERIC_SETUP_FIELDS = (
 CORNERS = ("FL", "FR", "RL", "RR")
 CORNER_FIELDS = ("camber", "toe", "pressure", "corner_weight")
 
-_TEXT_SETUP_FIELDS = {"sprocket_size"}
+_TEXT_SETUP_FIELDS = {"sprocket_size", "engine_tune"}
 _SETUP_FIELDS = (
     set(SETUP_CHOICES)
     | set(NUMERIC_SETUP_FIELDS)
@@ -63,29 +63,29 @@ def _normalise_corner_values(value: Any, corner: str) -> dict[str, int | float |
 
 
 def normalise_setup_settings_json(value: str) -> str:
-    """Validate and canonically serialize optional setup settings JSON."""
+    """Validate and canonically serialize optional outing settings JSON."""
     if not isinstance(value, str):
         raise ValidationError(
             "structured_settings_json",
-            "Enter structured setup settings as JSON text.",
+            "Enter structured outing settings as JSON text.",
         )
     try:
         parsed = json.loads(value)
     except (json.JSONDecodeError, TypeError, ValueError) as error:
         raise ValidationError(
             "structured_settings_json",
-            "Enter valid JSON for structured setup settings.",
+            "Enter valid JSON for structured outing settings.",
         ) from error
     if not isinstance(parsed, dict):
         raise ValidationError(
             "structured_settings_json",
-            "Structured setup settings must be a JSON object.",
+            "Structured outing settings must be a JSON object.",
         )
 
     unknown_keys = set(parsed) - _SETUP_FIELDS
     if unknown_keys:
         field = sorted(unknown_keys)[0]
-        raise ValidationError(field, f"Unknown setup setting: {field}.")
+        raise ValidationError(field, f"Unknown outing setting: {field}.")
 
     normalized: dict[str, Any] = {}
     for field, choices in SETUP_CHOICES.items():
@@ -97,7 +97,7 @@ def normalise_setup_settings_json(value: str) -> str:
         elif isinstance(value_at_field, str) and value_at_field in choices:
             normalized[field] = value_at_field
         else:
-            raise ValidationError(field, "Choose one of the listed setup values.")
+            raise ValidationError(field, "Choose one of the listed values.")
 
     for field in NUMERIC_SETUP_FIELDS:
         if field in parsed:
@@ -111,6 +111,15 @@ def normalise_setup_settings_json(value: str) -> str:
             normalized["sprocket_size"] = sprocket_size.strip()
         else:
             raise ValidationError("sprocket_size", "Enter text or leave this field blank.")
+
+    if "engine_tune" in parsed:
+        engine_tune = parsed["engine_tune"]
+        if isinstance(engine_tune, str):
+            engine_tune = engine_tune.strip()
+            if engine_tune:
+                normalized["engine_tune"] = engine_tune
+        else:
+            raise ValidationError("engine_tune", "Enter text or leave this field blank.")
 
     if "corners" in parsed:
         corners = parsed["corners"]

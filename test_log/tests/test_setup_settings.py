@@ -102,6 +102,23 @@ class SetupSettingsTests(unittest.TestCase):
         )
         self.assertEqual(normalise("{}"), "{}")
 
+    def test_normalises_optional_engine_tune_text_and_omits_blank_values(self):
+        normalise = self.require_normaliser()
+        self.assertEqual(
+            normalise('{"engine_tune":"  Honda K v3  "}'),
+            '{"engine_tune":"Honda K v3"}',
+        )
+        self.assertEqual(normalise('{"engine_tune":"  "}'), "{}")
+        self.assertEqual(normalise("{}"), "{}")
+
+    def test_rejects_non_text_engine_tune_values(self):
+        normalise = self.require_normaliser()
+        for value in (None, 42, True, [], {}):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError) as raised:
+                    normalise(json.dumps({"engine_tune": value}))
+                self.assertEqual(raised.exception.field, "engine_tune")
+
     def test_rejects_nonfinite_and_non_numeric_values_with_stable_fields(self):
         normalise = self.require_normaliser()
         invalid_values = (float("nan"), float("inf"), float("-inf"), True, "1.5")

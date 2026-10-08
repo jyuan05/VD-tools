@@ -229,6 +229,74 @@ class SharePackageTests(unittest.TestCase):
         copy_package_attachment(package, package.attachments[0], copied)
         self.assertEqual(copied.read_bytes(), b"day bytes")
 
+    def test_package_round_trip_preserves_opaque_binary_and_parquet_bytes(self):
+        snapshot = self.make_snapshot()
+        opaque_bytes = b"\x00PAR1\xff\x10raw\x00telemetry\xfePAR1"
+        relative_path = "attachments/opaque-telemetry.parquet"
+        (self.data_root / relative_path).write_bytes(opaque_bytes)
+        opaque_attachment = Attachment(
+            id="attachment-opaque-parquet",
+            owner_type="setup",
+            owner_id="setup-1",
+            role="file",
+            original_name="opaque-telemetry.parquet",
+            relative_path=relative_path,
+            created_at=CREATED_AT,
+        )
+        snapshot = dataclasses.replace(
+            snapshot,
+            attachments=(*snapshot.attachments, opaque_attachment),
+        )
+        target = self.root / "opaque-attachments.zip"
+
+        write_package(target, snapshot, self.store, "binary fixture")
+        package = read_package(target)
+
+        packaged = next(
+            item for item in package.attachments
+            if item.record.original_name == "opaque-telemetry.parquet"
+        )
+        self.assertEqual(packaged.record, opaque_attachment)
+        with zipfile.ZipFile(target) as archive:
+            self.assertEqual(archive.read(packaged.member), opaque_bytes)
+        copied = self.root / "round-tripped-opaque.parquet"
+        copy_package_attachment(package, packaged, copied)
+        self.assertEqual(copied.read_bytes(), opaque_bytes)
+
+    def test_engine_tune_changes_fingerprint(self):
+        snapshot = self.make_snapshot()
+        tuned_setup = dataclasses.replace(
+            snapshot.setups[0],
+            structured_settings_json=(
+                '{"corners":{"FL":{"toe":0.1}},'
+                '"engine_tune":"Honda K v3","front_spring_rate":"250"}'
+            ),
+        )
+        tuned_snapshot = dataclasses.replace(snapshot, setups=(tuned_setup,))
+        original_target = self.root / "original.zip"
+        tuned_target = self.root / "tuned.zip"
+
+        write_package(original_target, snapshot, self.store, "same source")
+        write_package(tuned_target, tuned_snapshot, self.store, "same source")
+
+        self.assertNotEqual(
+            read_package(original_target).fingerprint,
+            read_package(tuned_target).fingerprint,
+        )
+
+    def test_version_one_package_without_engine_tune_still_loads(self):
+        snapshot = self.make_snapshot()
+        target = self.root / "legacy-settings.zip"
+
+        write_package(target, snapshot, self.store, "legacy")
+        package = read_package(target)
+
+        with zipfile.ZipFile(target) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual(manifest["version"], 1)
+        self.assertEqual(share_package.PACKAGE_VERSION, 1)
+        self.assertNotIn("engine_tune", json.loads(package.setups[0].structured_settings_json))
+
     def test_fingerprint_ignores_source_label_export_time_and_local_presentation_order(self):
         first_target = self.root / "first.zip"
         second_target = self.root / "second.zip"

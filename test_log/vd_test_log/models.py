@@ -86,6 +86,17 @@ class Attachment:
 
 
 @dataclass(frozen=True, slots=True)
+class ParquetSnapshot:
+    """Immutable record set captured from one consistent SQLite read."""
+
+    days: tuple[TestDay, ...]
+    setups: tuple[Setup, ...]
+    event_layouts: tuple[EventLayout, ...]
+    laps: tuple[Lap, ...]
+    attachments: tuple[Attachment, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class StagedAttachment:
     role: AttachmentRole
     original_name: str

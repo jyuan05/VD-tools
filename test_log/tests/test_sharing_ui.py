@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from vd_test_log.models import DataPaths, EventLayout, TestDay, new_id, utc_now_iso
+from vd_test_log import sharing_ui
 from vd_test_log.services import TestLogServices
 from vd_test_log.ui import TestLogWindow
 
@@ -158,6 +159,12 @@ class SharingUiTests(unittest.TestCase):
 
         self.assertIn("Sharing", labels)
         self.assertEqual(self.root.minsize(), (900, 630))
+
+    def test_package_count_summary_uses_outing_wording(self):
+        summary = sharing_ui._format_counts(Counts(setups=2))
+
+        self.assertIn("2 outings", summary)
+        self.assertNotIn("setup", summary.lower())
 
     def test_export_cancel_and_optional_label_do_not_write_early(self):
         export = Mock(return_value=self.root_path / "saved.zip")

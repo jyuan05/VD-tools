@@ -110,7 +110,9 @@ class TestLogServicesTests(unittest.TestCase):
             notes="Keep the front settings",
             event_layout_id=event.id,
             driver="Driver Two",
-            structured_settings_json='{"rear_spring_rate":"300","diff_preload":0}',
+            structured_settings_json=(
+                '{"rear_spring_rate":"300","diff_preload":0,"engine_tune":"  Tune v2  "}'
+            ),
         )
         original = self.services.save_setup(original, (staged,))
         original_lap = Lap(

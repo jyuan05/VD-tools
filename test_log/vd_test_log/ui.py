@@ -25,28 +25,30 @@ from .validation import ValidationError
 
 
 _SETUP_TOP_LEVEL_FIELDS = (
-    "front_wing_height", "front_spring_rate", "front_damping_ratio", "rw_setting",
-    "sprocket_size", "rear_spring_rate", "rear_damping_ratio", "diff_ramp_angle",
-    "diff_preload", "rear_arb_blade_setting", "rear_arb_motion_ratio_setting",
+    "front_wing_height", "rw_setting", "front_spring_rate", "front_damping_ratio",
+    "rear_spring_rate", "rear_damping_ratio", "rear_arb_blade_setting",
+    "rear_arb_motion_ratio_setting", "diff_ramp_angle", "diff_preload",
+    "sprocket_size", "engine_tune",
 )
 
 _SETUP_TAB_FIELDS = {
     "Aero": (
         ("front_wing_height", "Front wing height (1 = lowest)"),
         ("rw_setting", "RW setting (1 = highest downforce)"),
-        ("sprocket_size", "Sprocket size"),
     ),
     "Suspension": (
         ("front_spring_rate", "Front spring rate (lb/in)"),
         ("front_damping_ratio", "Front damping ratio (dimensionless)"),
         ("rear_spring_rate", "Rear spring rate (lb/in)"),
         ("rear_damping_ratio", "Rear damping ratio (dimensionless)"),
-    ),
-    "Diff + ARB": (
-        ("diff_ramp_angle", "Diff ramp angle (degrees)"),
-        ("diff_preload", "Diff preload (ft-lb)"),
         ("rear_arb_blade_setting", "Rear ARB blade (1 = stiffest, 6 = softest)"),
         ("rear_arb_motion_ratio_setting", "Rear ARB motion ratio (MR1 = softer)"),
+    ),
+    "Powertrain": (
+        ("diff_ramp_angle", "Diff ramp angle (degrees)"),
+        ("diff_preload", "Diff preload (ft-lb)"),
+        ("sprocket_size", "Sprocket size"),
+        ("engine_tune", "Engine tune (name/version)"),
     ),
 }
 
@@ -59,7 +61,7 @@ _CORNER_FIELD_LABELS = {
 
 
 class TestLogWindow:
-    """Main three-level test-day, setup, and lap editor."""
+    """Main three-level test-day, outing, and lap editor."""
 
     def __init__(self, root: tk.Tk, services):
         self.root = root
@@ -115,9 +117,9 @@ class TestLogWindow:
         toolbar.grid(row=0, column=0, sticky="ew")
         button_specs = (
             ("add_day", "Add Test Day", self.add_day),
-            ("add_setup", "Add Setup", self.add_setup),
+            ("add_setup", "Add Outing", self.add_setup),
             ("add_lap", "Add Lap", self.add_lap),
-            ("duplicate_setup", "Duplicate Setup", self.duplicate_setup),
+            ("duplicate_setup", "Duplicate Outing", self.duplicate_setup),
             ("manage_events", "Manage Event/Layouts", self.manage_events),
             ("attach_file", "Attach File", self.attach_file),
             ("open_attachment", "Open Attachment", self.open_attachment),
@@ -128,6 +130,7 @@ class TestLogWindow:
             ("delete", "Delete", self.delete_current),
             ("backup", "Backup", self.create_backup),
             ("export_csv", "Export CSV", self.export_csv),
+            ("export_parquet", "Export Parquet…", self.export_parquet),
         )
         for index, (name, label, callback) in enumerate(button_specs):
             row, column = divmod(index, 7)
@@ -229,7 +232,7 @@ class TestLogWindow:
         panel.pack(fill="both", expand=True)
         panel.columnconfigure(0, weight=1)
         panel.rowconfigure(1, weight=1)
-        title = {"day": "Test Day", "setup": "Vehicle Setup", "lap": "Lap Record"}[kind]
+        title = {"day": "Test Day", "setup": "Outing", "lap": "Lap Record"}[kind]
         heading = ttk.Frame(panel)
         heading.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         heading.columnconfigure(0, weight=1)
@@ -239,7 +242,7 @@ class TestLogWindow:
         if kind == "setup":
             self.copy_setup_button = ttk.Button(
                 heading,
-                text="Copy to another day…",
+                text="Copy Outing to another day…",
                 command=self.copy_setup_to_another_day,
             )
             self.copy_setup_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
@@ -253,8 +256,8 @@ class TestLogWindow:
             general.columnconfigure(1, weight=1)
             notebook.add(general, text="General")
             row = 0
-            row = self._add_form_field(general, "name", "Setup label", row)
-            row = self._add_form_field(general, "setup_code", "Setup ID", row)
+            row = self._add_form_field(general, "name", "Outing label", row)
+            row = self._add_form_field(general, "setup_code", "Outing ID", row)
             row = self._add_form_field(general, "event_layout_id", "Default event / layout", row, choices=())
             row = self._add_form_field(general, "driver", "Default driver", row)
             row = self._add_form_field(general, "settings_text", "Settings", row, multiline=True)
@@ -476,7 +479,7 @@ class TestLogWindow:
             setup = self.services.get_setup(setup_id) if setup_id else None
             event_id = setup.event_layout_id if setup is not None else None
             driver = setup.driver if setup is not None else None
-            prefix = "New lap inherits setup defaults"
+            prefix = "New lap inherits outing defaults"
         else:
             event_id = record.event_layout_id if record is not None else None
             driver = record.driver if record is not None else None
@@ -728,6 +731,7 @@ class TestLogWindow:
         self.actions["attach_file"].state(["!disabled"] if self._current_kind else ["disabled"])
         self.actions["open_attachment"].state(["!disabled"] if self._attachment_refs else ["disabled"])
         self.actions["export_csv"].state(["!disabled"] if setup_id else ["disabled"])
+        self.actions["export_parquet"].state(["!disabled"])
 
     def add_day(self) -> None:
         if self._resolve_unsaved():
@@ -738,7 +742,7 @@ class TestLogWindow:
             return
         day_id = self._selected_day_id()
         if day_id is None:
-            self._set_status("Select a saved test day before adding a setup.")
+            self._set_status("Select a saved test day before adding an outing.")
             return
         self._show_editor("setup", None, is_new=True, context_id=day_id)
 
@@ -747,7 +751,7 @@ class TestLogWindow:
             return
         setup_id = self._selected_setup_id()
         if setup_id is None:
-            self._set_status("Select a saved setup before adding a lap.")
+            self._set_status("Select a saved outing before adding a lap.")
             return
         self._show_editor("lap", None, is_new=True, context_id=setup_id)
 
@@ -756,17 +760,17 @@ class TestLogWindow:
             return
         setup_id = self._selected_setup_id()
         if setup_id is None:
-            self._set_status("Select a saved setup to duplicate.")
+            self._set_status("Select a saved outing to duplicate.")
             return
         try:
             duplicate = self.services.duplicate_setup(setup_id)
         except Exception as error:
-            self._set_status(f"Could not duplicate setup: {error}")
-            messagebox.showerror("Duplicate setup", str(error), parent=self.root)
+            self._set_status(f"Could not duplicate outing: {error}")
+            messagebox.showerror("Duplicate outing", str(error), parent=self.root)
             return
         self.refresh_tree(select_item=f"setup:{duplicate.id}")
         self._show_editor("setup", duplicate, is_new=False)
-        self._set_status("Setup duplicated. Review its details and save any changes.")
+        self._set_status("Outing duplicated. Review its details and save any changes.")
 
     def _choose_copy_destination(self, destinations: list[TestDay]) -> str | None:
         day_id_by_label: dict[str, str] = {}
@@ -782,7 +786,7 @@ class TestLogWindow:
             day_id_by_label[label] = day.id
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("Copy setup to another day")
+        dialog.title("Copy outing to another day")
         dialog.transient(self.root)
         dialog.resizable(False, False)
         dialog.columnconfigure(0, weight=1)
@@ -815,7 +819,7 @@ class TestLogWindow:
         buttons = ttk.Frame(body)
         buttons.grid(row=2, column=0, sticky="e", pady=(12, 0))
         ttk.Button(buttons, text="Cancel", command=close).pack(side="right")
-        ttk.Button(buttons, text="Copy", command=accept).pack(side="right", padx=(0, 6))
+        ttk.Button(buttons, text="Copy Outing", command=accept).pack(side="right", padx=(0, 6))
         dialog.protocol("WM_DELETE_WINDOW", close)
         dialog.bind("<Escape>", lambda _event: close())
         dialog.bind("<Return>", lambda _event: accept())
@@ -829,11 +833,11 @@ class TestLogWindow:
         setup_id = self._selected_setup_id()
         setup = self.services.get_setup(setup_id) if setup_id else None
         if setup is None:
-            self._set_status("Select a saved setup to copy.")
+            self._set_status("Select a saved outing to copy.")
             return
         destinations = [day for day in self.services.list_days() if day.id != setup.test_day_id]
         if not destinations:
-            self._set_status("Create another test day before copying this setup.")
+            self._set_status("Create another test day before copying this outing.")
             return
         destination_day_id = self._choose_copy_destination(destinations)
         if destination_day_id is None:
@@ -841,12 +845,12 @@ class TestLogWindow:
         try:
             copied = self.services.copy_setup_to_day(setup_id, destination_day_id)
         except Exception as error:
-            self._set_status(f"Could not copy setup: {error}")
-            messagebox.showerror("Copy setup", str(error), parent=self.root)
+            self._set_status(f"Could not copy outing: {error}")
+            messagebox.showerror("Copy outing", str(error), parent=self.root)
             return
         self.refresh_tree(select_item=f"setup:{copied.id}")
         self._show_editor("setup", copied, is_new=False)
-        self._set_status("Setup copied to the selected test day.")
+        self._set_status("Outing copied to the selected test day.")
 
     def _setup_settings_json(self, values: dict[str, str]) -> str:
         settings: dict[str, object] = {}
@@ -854,7 +858,7 @@ class TestLogWindow:
             raw_value = values.get(field, "").strip()
             if not raw_value:
                 continue
-            if field in SETUP_CHOICES or field == "sprocket_size":
+            if field in SETUP_CHOICES or field in ("sprocket_size", "engine_tune"):
                 settings[field] = raw_value
             else:
                 settings[field] = self._finite_setup_number(field, raw_value)
@@ -903,7 +907,7 @@ class TestLogWindow:
             existing_record = self._record if isinstance(self._record, Setup) else None
             day_id = existing_record.test_day_id if existing_record else self._context_id
             if day_id is None:
-                raise ValidationError("test_day_id", "Select a test day for this setup.")
+                raise ValidationError("test_day_id", "Select a test day for this outing.")
             existing = self.services.list_setups(day_id)
             event_id = self._event_id_by_label.get(values.get("event_layout_id", ""))
             return Setup(
@@ -923,7 +927,7 @@ class TestLogWindow:
             existing_record = self._record if isinstance(self._record, Lap) else None
             setup_id = existing_record.setup_id if existing_record else self._context_id
             if setup_id is None:
-                raise ValidationError("setup_id", "Select a setup for this lap.")
+                raise ValidationError("setup_id", "Select an outing for this lap.")
             time_ms = parse_lap_time(values["lap_time"])
             if existing_record is not None:
                 event_id = existing_record.event_layout_id
@@ -936,7 +940,7 @@ class TestLogWindow:
                 if event is None or event.archived:
                     raise ValidationError(
                         "event_layout_id",
-                        "Choose an active event/layout on this setup before adding a lap.",
+                        "Choose an active event/layout on this outing before adding a lap.",
                     )
             existing = self.services.list_laps(setup_id)
             return Lap(
@@ -993,7 +997,12 @@ class TestLogWindow:
             if had_staged:
                 message += " Staged file copies were removed; reattach them before retrying."
             self._set_status(message)
-            messagebox.showerror(f"Save {self._current_kind}", message, parent=self.root)
+            title = {
+                "day": "Save test day",
+                "setup": "Save outing",
+                "lap": "Save lap",
+            }[self._current_kind]
+            messagebox.showerror(title, message, parent=self.root)
             return False
 
         kind = self._current_kind
@@ -1003,7 +1012,8 @@ class TestLogWindow:
         self._context_id = None
         self.refresh_tree(select_item=f"{kind}:{saved.id}")
         self._show_editor(kind, saved, is_new=False)
-        self._set_status(f"{kind.title()} saved.")
+        label = {"day": "Test day", "setup": "Outing", "lap": "Lap"}[kind]
+        self._set_status(f"{label} saved.")
         return True
 
 
@@ -1023,21 +1033,32 @@ class TestLogWindow:
 
     def attach_file(self) -> None:
         if self._current_kind is None:
-            self._set_status("Select or add a test day, setup, or lap before attaching a file.")
+            self._set_status("Select or add a test day, outing, or lap before attaching a file.")
             return
-        source = filedialog.askopenfilename(parent=self.root, title="Choose an attachment")
-        if not source:
+        sources = filedialog.askopenfilenames(parent=self.root, title="Choose attachments")
+        if not sources:
             return
+        staged_batch: list[StagedAttachment] = []
         try:
-            staged = self.services.stage_attachment(Path(source), "file")
+            for source in sources:
+                staged_batch.append(self.services.stage_attachment(Path(source), "file"))
         except Exception as error:
-            self._set_status(f"Could not stage attachment: {error}")
-            messagebox.showerror("Attach file", str(error), parent=self.root)
+            message = f"Could not stage attachment: {error}"
+            try:
+                cleanup_failures = self.services.discard_staged(staged_batch)
+            except Exception as cleanup_error:
+                cleanup_failures = []
+                message += f" Could not remove staged file copies: {cleanup_error}"
+            if cleanup_failures:
+                paths = ", ".join(str(path) for path in cleanup_failures)
+                message += f" Could not remove staged file copies: {paths}"
+            self._set_status(message)
+            messagebox.showerror("Attach file", message, parent=self.root)
             return
-        self._staged.append(staged)
+        self._staged.extend(staged_batch)
         self._refresh_attachment_list()
         self._update_dirty_indicator()
-        self._set_status("File copied into the data folder. Save this record to keep it.")
+        self._set_status("Files copied into the data folder. Save this record to keep them.")
 
     def open_data_folder(self) -> None:
         try:
@@ -1100,23 +1121,23 @@ class TestLogWindow:
         if record is None:
             kind, record = self._item_from_selection()
         if record is None or kind not in ("day", "setup", "lap"):
-            self._set_status("Select a saved test day, setup, or lap to delete.")
+            self._set_status("Select a saved test day, outing, or lap to delete.")
             return
         if kind == "day":
             setups = self.services.list_setups(record.id)
             lap_count = sum(len(self.services.list_laps(setup.id)) for setup in setups)
             prompt = (
                 f"Delete test day {record.date} at {record.location}? "
-                f"This also removes {len(setups)} setup(s), {lap_count} lap(s), and their attachment records."
+                f"This also removes {len(setups)} outing(s), {lap_count} lap(s), and their attachment records."
             )
             title = "Delete test day"
         elif kind == "setup":
             laps = self.services.list_laps(record.id)
             prompt = (
-                f"Delete setup {record.name}? This also removes {len(laps)} lap(s) "
-                "and the setup's and laps' attachment records."
+                f"Delete outing {record.name}? This also removes {len(laps)} lap(s) "
+                "and the outing's and laps' attachment records."
             )
-            title = "Delete setup"
+            title = "Delete outing"
         else:
             prompt = f"Delete lap {format_lap_time(record.time_ms)} and its attachment records?"
             title = "Delete lap"
@@ -1193,11 +1214,11 @@ class TestLogWindow:
             return
         setup_id = self._selected_setup_id()
         if setup_id is None:
-            self._set_status("Select a setup or one of its laps before exporting CSV.")
+            self._set_status("Select an outing or one of its laps before exporting CSV.")
             return
         destination = filedialog.asksaveasfilename(
             parent=self.root,
-            title="Export setup laps",
+            title="Export outing laps",
             defaultextension=".csv",
             filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
             initialfile="test-laps.csv",
@@ -1211,6 +1232,25 @@ class TestLogWindow:
             messagebox.showerror("Export CSV", str(error), parent=self.root)
             return
         self._set_status(f"CSV exported: {written}")
+
+    def export_parquet(self) -> None:
+        if self.sharing_ui is None or not self.sharing_ui._resolve_unsaved():
+            return
+        destination = filedialog.askdirectory(
+            parent=self.root,
+            title="Export whole log as Parquet",
+            mustexist=False,
+            initialdir=str(self.services.paths.root),
+        )
+        if not destination:
+            return
+        try:
+            written = self.services.export_parquet(Path(destination))
+        except Exception as error:
+            self._set_status(f"Parquet export failed: {error}")
+            messagebox.showerror("Export Parquet", str(error), parent=self.root)
+            return
+        self._set_status(f"Parquet exported: {written}")
 
     def close_request(self) -> bool:
         if not self._resolve_unsaved():

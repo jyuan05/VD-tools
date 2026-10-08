@@ -155,7 +155,10 @@ class TestLogUiTests(unittest.TestCase):
                     child
                     for child in self.root.winfo_children()
                     if isinstance(child, tk.Toplevel)
-                    and child.title() == "Copy setup to another day"
+                    and child.title() in (
+                        "Copy setup to another day",
+                        "Copy outing to another day",
+                    )
                 )
                 callback(dialog)
             except BaseException as error:
@@ -190,7 +193,7 @@ class TestLogUiTests(unittest.TestCase):
             button = next(
                 item
                 for item in self.find_widgets(dialog, ttk.Button)
-                if item.cget("text") == "Copy"
+                if item.cget("text") in ("Copy", "Copy Outing")
             )
             button.invoke()
 
@@ -248,7 +251,7 @@ class TestLogUiTests(unittest.TestCase):
                     title_label = next(
                         label
                         for label in self.find_widgets(window._editor_frame, ttk.Label)
-                        if label.cget("text") == "Edit Vehicle Setup"
+                        if label.cget("text") == "Edit Outing"
                     )
                     title_bounds = assert_inside_client(title_label, "setup editor title")
                     self.assertFalse(overlaps(copy_bounds, title_bounds))
@@ -376,7 +379,7 @@ class TestLogUiTests(unittest.TestCase):
 
         source = self.root_path / "lap-notes.txt"
         source.write_text("source remains", encoding="utf-8")
-        with patch("tkinter.filedialog.askopenfilename", return_value=str(source)):
+        with patch("tkinter.filedialog.askopenfilenames", return_value=(str(source),)):
             window.actions["attach_file"].invoke()
         staged = window.staged_attachments[0]
         stored_copy = self.paths.root / staged.relative_path
@@ -431,7 +434,7 @@ class TestLogUiTests(unittest.TestCase):
 
         source = self.root_path / "setup-note.txt"
         source.write_text("driver notes", encoding="utf-8")
-        with patch("tkinter.filedialog.askopenfilename", return_value=str(source)):
+        with patch("tkinter.filedialog.askopenfilenames", return_value=(str(source),)):
             window.actions["attach_file"].invoke()
         self.assertEqual(len(window.staged_attachments), 1)
         window.actions["save"].invoke()
@@ -445,6 +448,111 @@ class TestLogUiTests(unittest.TestCase):
         with patch("vd_test_log.ui.os.startfile") as startfile:
             window.actions["open_attachment"].invoke()
         startfile.assert_called_once_with(str(copied_path))
+
+    def test_attach_multiple_opaque_files_as_one_saved_batch(self):
+        day = self.services.save_day(self.make_day())
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"day:{day.id}")
+        binary = self.root_path / "sensor-dump.bin"
+        parquet = self.root_path / "run-data.parquet"
+        expected_bytes = {
+            binary.name: b"\x00\xffraw sensor bytes\x10",
+            parquet.name: b"PAR1\x00opaque parquet payload\x00PAR1",
+        }
+        for source in (binary, parquet):
+            source.write_bytes(expected_bytes[source.name])
+
+        with patch(
+            "vd_test_log.ui.filedialog.askopenfilenames",
+            return_value=(str(binary), str(parquet)),
+        ), patch(
+            "vd_test_log.ui.filedialog.askopenfilename",
+            return_value=str(binary),
+        ):
+            window.attach_file()
+
+        self.assertEqual(
+            [item.original_name for item in window.staged_attachments],
+            [binary.name, parquet.name],
+        )
+        self.assertEqual([item.role for item in window.staged_attachments], ["file", "file"])
+        window.actions["save"].invoke()
+
+        attachments = self.services.list_attachments("day", day.id)
+        self.assertEqual(
+            {item.original_name: item.role for item in attachments},
+            {binary.name: "file", parquet.name: "file"},
+        )
+        for attachment in attachments:
+            self.assertEqual(
+                self.services.resolve_attachment(attachment).read_bytes(),
+                expected_bytes[attachment.original_name],
+            )
+        self.assertEqual(
+            set(window.attachment_list.get(0, "end")),
+            {binary.name, parquet.name},
+        )
+
+    def test_attachment_batch_failure_discards_only_new_copies_and_reports_cleanup(self):
+        day = self.services.save_day(self.make_day())
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"day:{day.id}")
+        existing_source = self.root_path / "already-staged.txt"
+        existing_source.write_bytes(b"keep this staged copy")
+        existing_staged = self.services.stage_attachment(existing_source, "file")
+        window._staged.append(existing_staged)
+        window._refresh_attachment_list()
+        visible_before = window.attachment_list.get(0, "end")
+
+        binary = self.root_path / "first.bin"
+        parquet = self.root_path / "second.parquet"
+        binary.write_bytes(b"first file bytes")
+        parquet.write_bytes(b"second file bytes")
+        stage_real = self.services.stage_attachment
+        discard_real = self.services.discard_staged
+        batch_staged = []
+        discarded_batches = []
+        cleanup_failure = Path("attachments/simulated-cleanup-failure")
+
+        def fail_on_second(source, role):
+            if Path(source) == parquet:
+                raise OSError("second file failed")
+            staged = stage_real(source, role)
+            batch_staged.append(staged)
+            return staged
+
+        def discard_and_report(staged):
+            discarded_batches.append(tuple(staged))
+            discard_real(staged)
+            return [cleanup_failure]
+
+        with patch(
+            "vd_test_log.ui.filedialog.askopenfilenames",
+            return_value=(str(binary), str(parquet)),
+        ), patch(
+            "vd_test_log.ui.filedialog.askopenfilename",
+            return_value=str(binary),
+        ), patch.object(
+            self.services,
+            "stage_attachment",
+            side_effect=fail_on_second,
+        ), patch.object(
+            self.services,
+            "discard_staged",
+            side_effect=discard_and_report,
+        ) as discard, patch(
+            "tkinter.messagebox.showerror"
+        ) as show_error:
+            window.attach_file()
+
+        self.assertEqual(discard.call_count, 1)
+        self.assertEqual(discarded_batches, [(batch_staged[0],)])
+        self.assertFalse((self.paths.root / batch_staged[0].relative_path).exists())
+        self.assertEqual(window.staged_attachments, [existing_staged])
+        self.assertEqual(window.attachment_list.get(0, "end"), visible_before)
+        self.assertTrue((self.paths.root / existing_staged.relative_path).exists())
+        self.assertIn(str(cleanup_failure), show_error.call_args.args[1])
+        self.assertIn("second file failed", window.status_label.cget("text"))
 
     def test_delete_day_confirmation_names_cascade_and_removes_records(self):
         day = self.services.save_day(self.make_day())
@@ -466,7 +574,7 @@ class TestLogUiTests(unittest.TestCase):
         self.assertTrue(confirm.called)
         prompt = " ".join(str(part) for part in confirm.call_args.args).lower()
         self.assertIn("test day", prompt)
-        self.assertIn("setup", prompt)
+        self.assertIn("outing", prompt)
         self.assertIn("lap", prompt)
         self.assertIsNone(self.services.get_day(day.id))
         self.assertIsNone(self.services.get_setup(setup.id))
@@ -488,6 +596,105 @@ class TestLogUiTests(unittest.TestCase):
         backups = list(self.paths.backup_root.iterdir())
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "test_log.sqlite3").is_file())
+
+    def test_export_parquet_is_available_without_selection_and_uses_directory_picker(self):
+        window = self.require_window()
+        destination = self.root_path / "whole-log-dataset"
+        self.assertIn("export_parquet", window.actions)
+        self.assertFalse(window.actions["export_parquet"].instate(["disabled"]))
+
+        with patch(
+            "vd_test_log.ui.filedialog.askdirectory",
+            return_value=str(destination),
+        ) as choose_directory, patch.object(
+            self.services,
+            "export_parquet",
+            return_value=destination,
+        ) as export:
+            window.actions["export_parquet"].invoke()
+
+        choose_directory.assert_called_once()
+        self.assertFalse(choose_directory.call_args.kwargs["mustexist"])
+        export.assert_called_once_with(destination)
+        self.assertIn("Parquet exported", window.status_label.cget("text"))
+
+    def test_export_parquet_directory_picker_cancel_does_not_start_export(self):
+        window = self.require_window()
+        self.assertIn("export_parquet", window.actions)
+
+        with patch("vd_test_log.ui.filedialog.askdirectory", return_value=""), patch.object(
+            self.services,
+            "export_parquet",
+        ) as export:
+            window.actions["export_parquet"].invoke()
+
+        export.assert_not_called()
+
+    def test_export_parquet_cancel_resolves_dirty_event_manager_before_picker(self):
+        window = self.require_window()
+        window.actions["manage_events"].invoke()
+        manager = window.event_manager
+        self.managers.append(manager)
+        manager.actions["new_event"].invoke()
+        self.set_field(manager.fields["track_name"], "Pending Venue")
+        self.set_field(manager.fields["layout_name"], "Pending Loop")
+        self.assertTrue(manager._is_dirty())
+
+        with patch(
+            "vd_test_log.event_ui.messagebox.askyesnocancel",
+            return_value=None,
+        ) as confirm, patch(
+            "vd_test_log.ui.filedialog.askdirectory",
+        ) as choose_directory, patch.object(
+            self.services,
+            "export_parquet",
+        ) as export:
+            window.actions["export_parquet"].invoke()
+
+        confirm.assert_called_once()
+        choose_directory.assert_not_called()
+        export.assert_not_called()
+        self.assertTrue(manager._is_dirty())
+
+    def test_export_parquet_saves_dirty_event_manager_before_snapshot(self):
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as error:
+            self.skipTest(f"PyArrow readback is unavailable: {error}")
+
+        window = self.require_window()
+        window.actions["manage_events"].invoke()
+        manager = window.event_manager
+        self.managers.append(manager)
+        manager.actions["new_event"].invoke()
+        self.set_field(manager.fields["track_name"], "Export Venue")
+        self.set_field(manager.fields["layout_name"], "Export Loop")
+        self.set_field(manager.fields["event_name"], "Export Run")
+        source = self.root_path / "export-map.map"
+        source.write_bytes(b"opaque map bytes")
+        with patch("tkinter.filedialog.askopenfilename", return_value=str(source)):
+            manager.actions["attach_map"].invoke()
+        self.assertTrue(manager._is_dirty())
+        destination = self.root_path / "event-manager-export"
+
+        with patch(
+            "vd_test_log.event_ui.messagebox.askyesnocancel",
+            return_value=True,
+        ) as confirm, patch(
+            "vd_test_log.ui.filedialog.askdirectory",
+            return_value=str(destination),
+        ):
+            window.actions["export_parquet"].invoke()
+
+        confirm.assert_called_once()
+        self.assertFalse(manager._is_dirty())
+        event = self.services.list_event_layouts()[0]
+        self.assertEqual(event.track_name, "Export Venue")
+        attachments = pq.read_table(destination / "attachments.parquet").to_pylist()
+        self.assertEqual(
+            [(row["owner_type"], row["original_name"]) for row in attachments],
+            [("event_layout", "export-map.map")],
+        )
 
     def test_open_data_folder_button_uses_current_root_and_reports_os_errors(self):
         window = self.require_window()
@@ -577,7 +784,7 @@ class TestLogUiTests(unittest.TestCase):
         self.set_field(window.fields["notes"], "saved with order")
         source = self.root_path / "lap-evidence.txt"
         source.write_text("braking trace", encoding="utf-8")
-        with patch("tkinter.filedialog.askopenfilename", return_value=str(source)):
+        with patch("tkinter.filedialog.askopenfilenames", return_value=(str(source),)):
             window.actions["attach_file"].invoke()
 
         self.assertIn("pending", window.dirty_label.cget("text").lower())
@@ -611,7 +818,7 @@ class TestLogUiTests(unittest.TestCase):
         self.set_field(window.fields["notes"], "must roll back")
         source = self.root_path / "new-lap-file.txt"
         source.write_text("new evidence", encoding="utf-8")
-        with patch("tkinter.filedialog.askopenfilename", return_value=str(source)):
+        with patch("tkinter.filedialog.askopenfilenames", return_value=(str(source),)):
             window.actions["attach_file"].invoke()
         staged_path = self.paths.root / window.staged_attachments[0].relative_path
         self.assertTrue(staged_path.is_file())
@@ -714,7 +921,7 @@ class TestLogUiTests(unittest.TestCase):
         self.assertEqual(copied.setup_code, setup.setup_code)
         self.assertEqual(window.tree.selection(), (f"setup:{copied.id}",))
         self.assertEqual(window._record.id, copied.id)
-        self.assertEqual(window.status_label.cget("text"), "Setup copied to the selected test day.")
+        self.assertEqual(window.status_label.cget("text"), "Outing copied to the selected test day.")
 
     def test_copy_setup_dialog_cancel_and_window_close_leave_records_and_selection_unchanged(self):
         source_day = self.services.save_day(self.make_day())
@@ -879,6 +1086,64 @@ class TestLogUiTests(unittest.TestCase):
         self.assertEqual(manager.fields["track_name"].get(), "Unsaved track")
 
 
+    def test_outing_editor_uses_outing_terms_and_correct_field_groups(self):
+        day = self.services.save_day(self.make_day())
+        outing = self.services.save_setup(
+            self.make_setup(day.id, structured_settings_json='{"front_spring_rate":"250"}')
+        )
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"setup:{outing.id}")
+
+        labels = self.label_texts(window._editor_frame)
+        self.assertIn("Edit Outing", labels)
+        self.assertIn("Outing label", labels)
+        self.assertIn("Outing ID", labels)
+        self.assertIn("Settings", labels)
+        self.assertIn("Notes", labels)
+        self.assertEqual(
+            tuple(window.setup_notebook.tab(tab, "text") for tab in window.setup_notebook.tabs()),
+            ("General", "Aero", "Suspension", "Powertrain", "Corners"),
+        )
+        from vd_test_log.ui import _SETUP_TAB_FIELDS
+
+        fields = {
+            tab: {name for name, _label in entries}
+            for tab, entries in _SETUP_TAB_FIELDS.items()
+        }
+        self.assertEqual(fields["Aero"], {"front_wing_height", "rw_setting"})
+        self.assertEqual(
+            fields["Suspension"],
+            {
+                "front_spring_rate",
+                "front_damping_ratio",
+                "rear_spring_rate",
+                "rear_damping_ratio",
+                "rear_arb_blade_setting",
+                "rear_arb_motion_ratio_setting",
+            },
+        )
+        self.assertEqual(
+            fields["Powertrain"],
+            {"diff_ramp_angle", "diff_preload", "sprocket_size", "engine_tune"},
+        )
+        self.assertEqual(window.fields["engine_tune"].get(), "")
+        self.assertEqual(window.actions["add_setup"].cget("text"), "Add Outing")
+        self.assertEqual(window.actions["duplicate_setup"].cget("text"), "Duplicate Outing")
+        self.assertEqual(window.copy_setup_button.cget("text"), "Copy Outing to another day…")
+
+    def test_empty_outing_name_feedback_uses_outing_wording(self):
+        day = self.services.save_day(self.make_day())
+        window = self.require_window()
+        self.select_tree_item(window.tree, f"day:{day.id}")
+        window.actions["add_setup"].invoke()
+
+        window.actions["save"].invoke()
+
+        self.assertEqual(
+            window._field_errors["name"].cget("text"),
+            "Enter a valid outing name.",
+        )
+
     def test_setup_editor_exposes_setup_defaults_and_structured_fields(self):
         day = self.services.save_day(self.make_day())
         window = self.require_window()
@@ -899,6 +1164,7 @@ class TestLogUiTests(unittest.TestCase):
             "diff_preload",
             "rear_arb_blade_setting",
             "rear_arb_motion_ratio_setting",
+            "engine_tune",
             "FL_camber",
             "FL_toe",
             "FL_pressure",
@@ -955,6 +1221,7 @@ class TestLogUiTests(unittest.TestCase):
             "front_damping_ratio": "0.82",
             "rw_setting": "LD",
             "sprocket_size": "15/42",
+            "engine_tune": "Honda K v3",
             "rear_spring_rate": "250",
             "rear_damping_ratio": "0.65",
             "diff_ramp_angle": "45",
@@ -995,6 +1262,7 @@ class TestLogUiTests(unittest.TestCase):
                 "front_damping_ratio": 0.82,
                 "rw_setting": "LD",
                 "sprocket_size": "15/42",
+                "engine_tune": "Honda K v3",
                 "rear_spring_rate": "250",
                 "rear_damping_ratio": 0.65,
                 "diff_ramp_angle": 45.0,
@@ -1034,6 +1302,7 @@ class TestLogUiTests(unittest.TestCase):
             "Corner weight (lb)",
             "Rear ARB blade (1 = stiffest, 6 = softest)",
             "Rear ARB motion ratio (MR1 = softer)",
+            "Engine tune (name/version)",
         ):
             self.assertIn(expected_label, labels)
 
@@ -1054,6 +1323,7 @@ class TestLogUiTests(unittest.TestCase):
             "front_wing_height", "front_spring_rate", "front_damping_ratio", "rw_setting", "sprocket_size",
             "rear_spring_rate", "rear_damping_ratio", "diff_ramp_angle", "diff_preload",
             "rear_arb_blade_setting", "rear_arb_motion_ratio_setting",
+            "engine_tune",
             "FL_camber", "FL_toe", "FL_pressure", "FL_corner_weight",
             "FR_camber", "FR_toe", "FR_pressure", "FR_corner_weight",
             "RL_camber", "RL_toe", "RL_pressure", "RL_corner_weight",
@@ -1104,7 +1374,7 @@ class TestLogUiTests(unittest.TestCase):
         self.set_field(window.fields["notes"], "Dry line at the apex")
         source = self.root_path / "new-lap-evidence.txt"
         source.write_text("new lap trace", encoding="utf-8")
-        with patch("tkinter.filedialog.askopenfilename", return_value=str(source)):
+        with patch("tkinter.filedialog.askopenfilenames", return_value=(str(source),)):
             window.actions["attach_file"].invoke()
 
         window.actions["save"].invoke()

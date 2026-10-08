@@ -1,4 +1,4 @@
-"""CSV export for one setup, preserving all lap statuses and notes."""
+"""CSV export for one outing, preserving all lap statuses and notes."""
 
 from __future__ import annotations
 
@@ -36,10 +36,10 @@ def export_setup(
 ) -> Path:
     setup = repository.get_setup(setup_id)
     if setup is None:
-        raise ValidationError("setup_id", "Select an existing setup to export.")
+        raise ValidationError("setup_id", "Select an existing outing to export.")
     day = repository.get_day(setup.test_day_id)
     if day is None:
-        raise ValidationError("setup_id", "The setup's test day no longer exists.")
+        raise ValidationError("setup_id", "The outing's test day no longer exists.")
 
     rows: list[dict[str, object]] = []
     for lap in repository.list_laps(setup_id):

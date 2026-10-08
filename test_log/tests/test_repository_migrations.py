@@ -5,6 +5,7 @@ from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vd_test_log.repository import SQLiteRepository
 from vd_test_log.validation import ValidationError
@@ -206,8 +207,8 @@ class RepositoryMigrationTests(unittest.TestCase):
         try:
             with closing(sqlite3.connect(self.database_path)) as connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(version, 2, "schema 1 should migrate to schema 2")
-            if version != 2:
+            self.assertEqual(version, 3, "schema 1 should migrate through schema 2 to schema 3")
+            if version != 3:
                 return
 
             expected_defaults = {
@@ -258,6 +259,149 @@ class RepositoryMigrationTests(unittest.TestCase):
                 before_attachments,
             )
         self.assertEqual(attachment_file.read_bytes(), b"preserve attachment bytes")
+
+    def test_schema_one_migration_commits_version_two_before_version_three(self):
+        create_schema_one_database(self.database_path)
+        observed_versions = []
+        migrate_schema_two_to_three = getattr(
+            SQLiteRepository, "_migrate_schema_two_to_three", None
+        )
+        self.assertIsNotNone(migrate_schema_two_to_three)
+
+        def record_prior_version(connection):
+            observed_versions.append(
+                connection.execute("PRAGMA user_version").fetchone()[0]
+            )
+            return migrate_schema_two_to_three(connection)
+
+        with patch.object(
+            SQLiteRepository,
+            "_migrate_schema_two_to_three",
+            side_effect=record_prior_version,
+        ):
+            repository = SQLiteRepository.open(self.database_path)
+            repository.close()
+
+        self.assertEqual(observed_versions, [2])
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+
+    def test_schema_two_to_three_preserves_setup_json_and_attachments(self):
+        _, _, _, attachment_file = create_schema_one_database(self.database_path)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            SQLiteRepository._migrate_schema_one_to_two(connection)
+            connection.execute(
+                "UPDATE setups SET structured_settings_json = ? WHERE id = ?",
+                ('{"sprocket_size":"42"}', "setup-uniform"),
+            )
+            connection.commit()
+            setup_before = [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT id, structured_settings_json FROM setups ORDER BY id"
+                )
+            ]
+            attachments_before = [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT id, owner_type, role, original_name, relative_path, created_at "
+                    "FROM attachments ORDER BY id"
+                )
+            ]
+
+        repository = SQLiteRepository.open(self.database_path)
+        repository.close()
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(
+                [
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT id, structured_settings_json FROM setups ORDER BY id"
+                    )
+                ],
+                setup_before,
+            )
+            self.assertEqual(
+                [
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT id, owner_type, role, original_name, relative_path, created_at "
+                        "FROM attachments ORDER BY id"
+                    )
+                ],
+                attachments_before,
+            )
+        self.assertEqual(attachment_file.read_bytes(), b"preserve attachment bytes")
+
+    def test_second_migration_failure_leaves_valid_schema_two_database(self):
+        create_schema_one_database(self.database_path)
+        migrate_schema_one_to_two = SQLiteRepository._migrate_schema_one_to_two
+
+        def migrate_one_then_block_version_three(connection):
+            migrate_schema_one_to_two(connection)
+
+            def deny_v3_pragma(action, argument, value, database_name, source):
+                if (
+                    action == sqlite3.SQLITE_PRAGMA
+                    and argument.lower() == "user_version"
+                    and value == "3"
+                ):
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            connection.set_authorizer(deny_v3_pragma)
+
+        with patch.object(
+            SQLiteRepository,
+            "_migrate_schema_one_to_two",
+            side_effect=migrate_one_then_block_version_three,
+        ):
+            repository = None
+            try:
+                with self.assertRaises(sqlite3.DatabaseError):
+                    repository = SQLiteRepository.open(self.database_path)
+            finally:
+                if repository is not None:
+                    repository.close()
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(setups)")}
+            self.assertIn("event_layout_id", columns)
+            self.assertIn("driver", columns)
+            self.assertIn("structured_settings_json", columns)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT structured_settings_json FROM setups WHERE id = ?",
+                    ("setup-uniform",),
+                ).fetchone()[0],
+                "{}",
+            )
+
+    def test_schema_two_reader_rejects_schema_three_without_changing_database(self):
+        _, _, _, _ = create_schema_one_database(self.database_path)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            SQLiteRepository._migrate_schema_one_to_two(connection)
+        current = SQLiteRepository.open(self.database_path)
+        current.close()
+        before = self.database_path.read_bytes()
+
+        with patch("vd_test_log.repository.SCHEMA_VERSION", 2):
+            repository = None
+            try:
+                with self.assertRaises(ValidationError):
+                    repository = SQLiteRepository.open(self.database_path)
+            finally:
+                if repository is not None:
+                    repository.close()
+
+        self.assertEqual(self.database_path.read_bytes(), before)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_migration_failure_rolls_back_added_columns_and_version(self):
         create_schema_one_database(self.database_path)

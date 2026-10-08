@@ -12,6 +12,7 @@ from .models import (
     Attachment,
     EventLayout,
     Lap,
+    ParquetSnapshot,
     Setup,
     StagedAttachment,
     TestDay,
@@ -29,7 +30,7 @@ from .validation import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _OWNER_COLUMNS = {
     "day": "day_owner_id",
@@ -238,11 +239,11 @@ class SQLiteRepository:
             )
         }
         required_tables = {"test_days", "setups", "event_layouts", "laps", "attachments"}
-        if version == SCHEMA_VERSION:
+        if version in (2, SCHEMA_VERSION):
             if not required_tables.issubset(table_names):
                 raise ValidationError(
                     "database",
-                    "The version 2 test log database is incomplete and was not changed.",
+                    f"The version {version} test log database is incomplete and was not changed.",
                 )
             setup_columns = {
                 row["name"]
@@ -256,8 +257,10 @@ class SQLiteRepository:
             if not required_setup_columns.issubset(setup_columns):
                 raise ValidationError(
                     "database",
-                    "The version 2 test log database is incomplete and was not changed.",
+                    f"The version {version} test log database is incomplete and was not changed.",
                 )
+            if version == 2:
+                SQLiteRepository._migrate_schema_two_to_three(connection)
             return
         if version == 1:
             if not required_tables.issubset(table_names):
@@ -266,6 +269,7 @@ class SQLiteRepository:
                     "The version 1 test log database is incomplete and was not changed.",
                 )
             SQLiteRepository._migrate_schema_one_to_two(connection)
+            SQLiteRepository._migrate_schema_two_to_three(connection)
             return
         if version > SCHEMA_VERSION:
             raise ValidationError(
@@ -283,6 +287,16 @@ class SQLiteRepository:
             for statement in _CREATE_STATEMENTS:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_schema_two_to_three(connection: sqlite3.Connection) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute("PRAGMA user_version = 3")
             connection.commit()
         except Exception:
             connection.rollback()
@@ -394,7 +408,7 @@ class SQLiteRepository:
                 END
                 """
             )
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.execute("PRAGMA user_version = 2")
             connection.commit()
         except Exception:
             connection.rollback()
@@ -563,6 +577,80 @@ class SQLiteRepository:
         )
         return [self._attachment_from_row(row) for row in rows]
 
+    def capture_parquet_snapshot(self) -> ParquetSnapshot:
+        """Read every export record under one immutable SQLite snapshot."""
+        if self._closed:
+            raise RuntimeError("The repository is closed.")
+        if self._connection.in_transaction:
+            raise RuntimeError("Cannot capture an export snapshot during another transaction.")
+
+        self._connection.execute("BEGIN")
+        try:
+            days = tuple(
+                self._day_from_row(row)
+                for row in self._connection.execute(
+                    "SELECT * FROM test_days ORDER BY date DESC, created_at DESC, id"
+                )
+            )
+            setups = tuple(
+                self._setup_from_row(row)
+                for row in self._connection.execute(
+                    """
+                    SELECT s.*
+                    FROM setups AS s
+                    JOIN test_days AS d ON d.id = s.test_day_id
+                    ORDER BY d.date DESC, d.created_at DESC, d.id, s.sort_order, s.id
+                    """
+                )
+            )
+            event_layouts = tuple(
+                self._event_from_row(row)
+                for row in self._connection.execute(
+                    """
+                    SELECT * FROM event_layouts
+                    ORDER BY track_name, layout_name, event_name, created_at, id
+                    """
+                )
+            )
+            laps = tuple(
+                self._lap_from_row(row)
+                for row in self._connection.execute(
+                    """
+                    SELECT l.*
+                    FROM laps AS l
+                    JOIN setups AS s ON s.id = l.setup_id
+                    JOIN test_days AS d ON d.id = s.test_day_id
+                    ORDER BY d.date DESC, d.created_at DESC, d.id,
+                             s.sort_order, s.id, l.sequence, l.id
+                    """
+                )
+            )
+            attachments = tuple(
+                self._attachment_from_row(row)
+                for row in self._connection.execute(
+                    """
+                    SELECT id, owner_type,
+                           COALESCE(day_owner_id, setup_owner_id, lap_owner_id,
+                                    event_layout_owner_id) AS owner_id,
+                           role, original_name, relative_path, created_at
+                    FROM attachments
+                    ORDER BY owner_type, owner_id, created_at, id
+                    """
+                )
+            )
+            self._connection.commit()
+        except Exception:
+            self._connection.rollback()
+            raise
+
+        return ParquetSnapshot(
+            days=days,
+            setups=setups,
+            event_layouts=event_layouts,
+            laps=laps,
+            attachments=attachments,
+        )
+
     def save_day(
         self,
         record: TestDay,
@@ -603,7 +691,7 @@ class SQLiteRepository:
             self._connection.execute("BEGIN IMMEDIATE")
             previous = self.get_setup(record.id)
             if previous is not None and previous.test_day_id != record.test_day_id:
-                raise ValidationError("test_day_id", "A saved setup cannot be moved to another test day.")
+                raise ValidationError("test_day_id", "A saved outing cannot be moved to another test day.")
             saved = replace(record, created_at=previous.created_at) if previous else record
             event_layout_id = saved.event_layout_id
             if isinstance(event_layout_id, str) and not event_layout_id.strip():
@@ -1041,11 +1129,11 @@ class SQLiteRepository:
             self._connection.execute("BEGIN IMMEDIATE")
             previous = self.get_lap(record.id)
             if previous is not None and previous.setup_id != record.setup_id:
-                raise ValidationError("setup_id", "A saved lap cannot be moved to another setup.")
+                raise ValidationError("setup_id", "A saved lap cannot be moved to another outing.")
             saved = replace(record, created_at=previous.created_at) if previous else record
             validate_lap(saved)
             if self.get_setup(saved.setup_id) is None:
-                raise ValidationError("setup_id", "Select an existing setup.")
+                raise ValidationError("setup_id", "Select an existing outing.")
             event = self.get_event_layout(saved.event_layout_id)
             if event is None:
                 raise ValidationError("event_layout_id", "Select an existing event/layout.")
@@ -1230,7 +1318,7 @@ class SQLiteRepository:
             raise ValidationError("lap_ids", "Provide the lap IDs in the desired order.")
         order = tuple(lap_ids)
         if self.get_setup(setup_id) is None:
-            raise ValidationError("setup_id", "Select an existing setup.")
+            raise ValidationError("setup_id", "Select an existing outing.")
         rows = list(
             self._connection.execute(
                 "SELECT id, sequence FROM laps WHERE setup_id = ? ORDER BY sequence, id",
@@ -1241,7 +1329,7 @@ class SQLiteRepository:
         if len(order) != len(existing_ids) or set(order) != set(existing_ids):
             raise ValidationError(
                 "lap_ids",
-                "Lap order must contain every lap in this setup exactly once.",
+                "Lap order must contain every lap in this outing exactly once.",
             )
         if not order:
             return []

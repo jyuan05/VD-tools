@@ -579,23 +579,23 @@ def _validate_records(days, setups, laps, event_layouts, attachments) -> None:
     setup_order_keys: set[tuple[str, int]] = set()
     for setup in setups:
         if setup.test_day_id not in ids_by_kind[TestDay]:
-            raise PackageError(f"Setup {setup.id!r} refers to a missing test day.")
+            raise PackageError(f"Outing {setup.id!r} refers to a missing test day.")
         if setup.event_layout_id is not None and setup.event_layout_id not in ids_by_kind[EventLayout]:
-            raise PackageError(f"Setup {setup.id!r} refers to a missing event/layout.")
+            raise PackageError(f"Outing {setup.id!r} refers to a missing event/layout.")
         key = (setup.test_day_id, setup.order)
         if key in setup_order_keys:
-            raise PackageError(f"The package contains duplicate setup order {setup.order} for day {setup.test_day_id!r}.")
+            raise PackageError(f"The package contains duplicate outing order {setup.order} for day {setup.test_day_id!r}.")
         setup_order_keys.add(key)
 
     lap_sequence_keys: set[tuple[str, int]] = set()
     for lap in laps:
         if lap.setup_id not in ids_by_kind[Setup]:
-            raise PackageError(f"Lap {lap.id!r} refers to a missing setup.")
+            raise PackageError(f"Lap {lap.id!r} refers to a missing outing.")
         if lap.event_layout_id not in ids_by_kind[EventLayout]:
             raise PackageError(f"Lap {lap.id!r} refers to a missing event/layout.")
         key = (lap.setup_id, lap.sequence)
         if key in lap_sequence_keys:
-            raise PackageError(f"The package contains duplicate lap sequence {lap.sequence} for setup {lap.setup_id!r}.")
+            raise PackageError(f"The package contains duplicate lap sequence {lap.sequence} for outing {lap.setup_id!r}.")
         lap_sequence_keys.add(key)
 
     attachment_ids: set[str] = set()
@@ -728,7 +728,7 @@ def _validate_setup_json(value: str) -> None:
             parse_constant=_reject_json_constant,
         )
     except (json.JSONDecodeError, ValueError, TypeError) as error:
-        raise PackageError(f"Structured setup settings are not strict JSON: {error}") from error
+        raise PackageError(f"Structured outing settings are not strict JSON: {error}") from error
 
 
 def _reject_json_constant(value):

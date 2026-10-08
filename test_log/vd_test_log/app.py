@@ -17,7 +17,7 @@ from .ui import TestLogWindow
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vd_test_log",
-        description="Record offline vehicle test days, setups, laps, and files.",
+        description="Record offline vehicle test days, outings, laps, and files.",
     )
     parser.add_argument(
         "--data-dir",

@@ -62,23 +62,23 @@ def validate_day(record: TestDay) -> None:
 def validate_setup(record: Setup) -> None:
     _required_text(record.id, "id", "record ID")
     _required_text(record.test_day_id, "test_day_id", "test day")
-    _required_text(record.name, "name", "setup name")
+    _required_text(record.name, "name", "valid outing name")
     _optional_text(record.setup_code, "setup_code")
     if not isinstance(record.settings_text, str):
-        raise ValidationError("settings_text", "Enter setup settings as text.")
+        raise ValidationError("settings_text", "Enter outing settings as text.")
     _optional_text(record.notes, "notes")
     _optional_text(record.event_layout_id, "event_layout_id")
     _optional_text(record.driver, "driver")
     if not isinstance(record.structured_settings_json, str):
         raise ValidationError(
             "structured_settings_json",
-            "Enter structured setup settings as JSON text.",
+            "Enter structured outing settings as JSON text.",
         )
     from .setup_settings import normalise_setup_settings_json
 
     normalise_setup_settings_json(record.structured_settings_json)
     if isinstance(record.order, bool) or not isinstance(record.order, int) or record.order <= 0:
-        raise ValidationError("order", "Setup order must be a positive whole number.")
+        raise ValidationError("order", "Outing order must be a positive whole number.")
     _aware_timestamp(record.created_at)
 
 
@@ -101,7 +101,7 @@ def validate_event_layout(record: EventLayout) -> None:
 
 def validate_lap(record: Lap) -> None:
     _required_text(record.id, "id", "record ID")
-    _required_text(record.setup_id, "setup_id", "setup")
+    _required_text(record.setup_id, "setup_id", "outing")
     _required_text(record.event_layout_id, "event_layout_id", "event and layout")
     if isinstance(record.sequence, bool) or not isinstance(record.sequence, int) or record.sequence <= 0:
         raise ValidationError("sequence", "Lap sequence must be a positive whole number.")

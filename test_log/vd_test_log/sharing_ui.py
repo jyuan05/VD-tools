@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 def _format_counts(counts) -> str:
     units = (
         (counts.days, "day", "days"),
-        (counts.setups, "setup", "setups"),
+        (counts.setups, "outing", "outings"),
         (counts.laps, "lap", "laps"),
         (counts.event_layouts, "event/layout", "event/layouts"),
         (counts.attachments, "attachment", "attachments"),

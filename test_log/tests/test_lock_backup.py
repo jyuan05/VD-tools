@@ -1,11 +1,12 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from vd_test_log.backup import BackupError
 from vd_test_log.data_folder import DataRootLock
-from vd_test_log.models import DataPaths, TestDay, new_id, utc_now_iso
+from vd_test_log.models import DataPaths, Setup, TestDay, new_id, utc_now_iso
 from vd_test_log.repository import SQLiteRepository
 from vd_test_log.services import BackupInProgressError, TestLogServices
 
@@ -58,6 +59,18 @@ class LockBackupTests(unittest.TestCase):
         referenced_stage = self.services.stage_attachment(source, "file")
         day = self.make_day()
         self.services.save_day(day, (referenced_stage,))
+        setup = Setup(
+            id=new_id(),
+            test_day_id=day.id,
+            name="Tune verification",
+            setup_code=None,
+            settings_text="Backup round trip",
+            notes=None,
+            order=1,
+            created_at=utc_now_iso(),
+            structured_settings_json='{"engine_tune":"Tune v3"}',
+        )
+        self.services.save_setup(setup)
         referenced = self.services.list_attachments("day", day.id)[0]
 
         orphan_source = self.root / "orphan.txt"
@@ -65,9 +78,12 @@ class LockBackupTests(unittest.TestCase):
         orphan = self.services.stage_attachment(orphan_source, "file")
 
         backup = self.services.create_backup()
+        with closing(sqlite3.connect(backup / "test_log.sqlite3")) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
         snapshot = SQLiteRepository.open(backup / "test_log.sqlite3")
         try:
             self.assertEqual(snapshot.list_days(), [day])
+            self.assertEqual(snapshot.get_setup(setup.id), setup)
             self.assertEqual(snapshot.list_attachments("day", day.id), [referenced])
         finally:
             snapshot.close()

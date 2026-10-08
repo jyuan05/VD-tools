@@ -12,6 +12,7 @@ from pathlib import Path
 from vd_test_log.models import (
     EventLayout,
     Lap,
+    ParquetSnapshot,
     Setup,
     StagedAttachment,
     TestDay,
@@ -146,13 +147,13 @@ class RepositoryTests(unittest.TestCase):
         parsed_created_at = datetime.fromisoformat(attachments[0].created_at)
         self.assertIsNotNone(parsed_created_at.tzinfo)
 
-    def test_new_database_uses_schema_version_two(self):
+    def test_new_database_uses_schema_version_three(self):
         with closing(sqlite3.connect(self.database_path)) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             setup_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(setups)")
             }
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
         self.assertTrue(
             {"event_layout_id", "driver", "structured_settings_json"} <= setup_columns
         )
@@ -160,6 +161,103 @@ class RepositoryTests(unittest.TestCase):
         self.repository.close()
         self.repository = SQLiteRepository.open(self.database_path)
         self.assertEqual(self.repository.list_days(), [])
+
+    def test_parquet_snapshot_is_immutable_and_uses_stable_record_order(self):
+        older_day = make_day("day-old", date="2026-10-02")
+        newer_day = make_day("day-new", date="2026-10-05")
+        self.repository.save_day(older_day)
+        self.repository.save_day(newer_day)
+        older_setup = make_setup("setup-old", older_day.id, order=1)
+        newer_second_setup = make_setup("setup-new-2", newer_day.id, order=2)
+        newer_first_setup = make_setup("setup-new-1", newer_day.id, order=1)
+        for setup in (older_setup, newer_second_setup, newer_first_setup):
+            self.repository.save_setup(setup)
+        first_event = make_event("event-a", track_name="Alpha")
+        second_event = make_event("event-b", track_name="Bravo")
+        self.repository.save_event_layout(second_event)
+        self.repository.save_event_layout(first_event)
+        for lap in (
+            make_lap("lap-2", newer_first_setup.id, second_event.id, sequence=2),
+            make_lap("lap-1", newer_first_setup.id, first_event.id, sequence=1),
+        ):
+            self.repository.save_lap(lap)
+        self.repository.save_day(
+            dataclasses.replace(
+                older_day,
+                notes="day attachment owner",
+            ),
+            attachments=(StagedAttachment("file", "day.txt", "days/day-old/day.txt"),),
+        )
+
+        snapshot = self.repository.capture_parquet_snapshot()
+
+        self.assertIsInstance(snapshot, ParquetSnapshot)
+        self.assertEqual(tuple(day.id for day in snapshot.days), ("day-new", "day-old"))
+        self.assertEqual(
+            tuple(setup.id for setup in snapshot.setups),
+            ("setup-new-1", "setup-new-2", "setup-old"),
+        )
+        self.assertEqual(tuple(event.id for event in snapshot.event_layouts), ("event-a", "event-b"))
+        self.assertEqual(tuple(lap.id for lap in snapshot.laps), ("lap-1", "lap-2"))
+        self.assertEqual(tuple(item.owner_type for item in snapshot.attachments), ("day",))
+        with self.assertRaises((AttributeError, TypeError)):
+            snapshot.days = ()
+        with self.assertRaises((AttributeError, TypeError)):
+            snapshot.setups[0] = older_setup
+
+    def test_parquet_snapshot_keeps_a_consistent_sqlite_read_view(self):
+        self.repository.close()
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+        self.repository = SQLiteRepository.open(self.database_path)
+        day = make_day("day-before-writer")
+        setup = make_setup("setup-before-writer", day.id)
+        self.repository.save_day(day)
+        self.repository.save_setup(setup)
+
+        writer = sqlite3.connect(self.database_path, timeout=2)
+        inserted = False
+
+        def add_later_outing(sql):
+            nonlocal inserted
+            if inserted or not sql.lstrip().upper().startswith("SELECT S.*"):
+                return
+            inserted = True
+            writer.execute(
+                """
+                INSERT INTO test_days(id, date, location, weather, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("day-after-snapshot", "2026-10-09", "Later", None, None, CREATED_AT),
+            )
+            writer.execute(
+                """
+                INSERT INTO setups(
+                    id, test_day_id, name, setup_code, settings_text, notes,
+                    sort_order, created_at, event_layout_id, driver, structured_settings_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "setup-after-snapshot", "day-after-snapshot", "Later", None,
+                    "", None, 1, CREATED_AT, None, None, "{}",
+                ),
+            )
+            writer.commit()
+
+        self.repository._connection.set_trace_callback(add_later_outing)
+        try:
+            snapshot = self.repository.capture_parquet_snapshot()
+        finally:
+            self.repository._connection.set_trace_callback(None)
+            writer.close()
+
+        self.assertTrue(inserted)
+        self.assertEqual(tuple(day.id for day in snapshot.days), ("day-before-writer",))
+        self.assertEqual(tuple(setup.id for setup in snapshot.setups), ("setup-before-writer",))
+        self.assertEqual(
+            tuple(day.id for day in self.repository.list_days()),
+            ("day-after-snapshot", "day-before-writer"),
+        )
     def test_rejects_impossible_dates_and_blank_required_text(self):
         invalid_records = (
             (make_day(date="2026-02-30"), "date"),
